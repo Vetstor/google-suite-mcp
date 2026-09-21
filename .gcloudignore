@@ -1,0 +1,11 @@
+.git
+.gitignore
+node_modules
+dist
+.env
+*.env.local
+*service-account*.json
+*service_account*.json
+credentials/
+test
+Dockerfile.dev
