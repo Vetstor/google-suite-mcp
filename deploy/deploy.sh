@@ -130,6 +130,6 @@ NEXT STEPS
 2. In claude.ai -> Settings -> Connectors -> Add custom connector:
        ${SERVICE_URL}/mcp
    (No client id/secret needed — dynamic client registration handles it.)
-3. Health check:  curl ${SERVICE_URL}/healthz
+3. Health check:  curl ${SERVICE_URL}/health
 ============================================================
 EOF

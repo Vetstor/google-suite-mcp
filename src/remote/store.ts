@@ -82,6 +82,23 @@ export interface Store {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: strip undefined fields recursively so Firestore never rejects them.
+// Also exported for testing.
+// ---------------------------------------------------------------------------
+
+export function stripUndefined<T>(obj: T): T {
+  if (obj === null || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return (obj as unknown[]).map(stripUndefined) as unknown as T;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (v !== undefined) {
+      out[k] = stripUndefined(v);
+    }
+  }
+  return out as T;
+}
+
+// ---------------------------------------------------------------------------
 // In-memory implementation (local dev / tests)
 // ---------------------------------------------------------------------------
 
@@ -165,7 +182,10 @@ export class MemoryStore implements Store {
  */
 export async function createFirestoreStore(database: string): Promise<Store> {
   const { Firestore, Timestamp } = await import("@google-cloud/firestore");
-  const db = new Firestore({ databaseId: database });
+  // ignoreUndefinedProperties: belt-and-suspenders on top of stripUndefined so
+  // any optional field that slips through does not throw "Cannot use undefined
+  // as a Firestore value".
+  const db = new Firestore({ databaseId: database, ignoreUndefinedProperties: true });
 
   const CLIENTS = "clients";
   const PENDING = "pendingAuth";
@@ -175,9 +195,10 @@ export async function createFirestoreStore(database: string): Promise<Store> {
   const USERS = "users";
 
   // Convert our numeric expiresAt into a Firestore Timestamp so a TTL policy
-  // can be enabled on the field; everything else is stored verbatim.
+  // can be enabled on the field; stripUndefined first so optional fields set to
+  // undefined by the SDK never reach Firestore.
   const toDoc = <T extends { expiresAt?: number }>(rec: T) => {
-    const out: Record<string, unknown> = { ...rec };
+    const out: Record<string, unknown> = { ...stripUndefined(rec) };
     if (typeof rec.expiresAt === "number") {
       out.expiresAt = Timestamp.fromMillis(rec.expiresAt);
     }
@@ -201,7 +222,9 @@ export async function createFirestoreStore(database: string): Promise<Store> {
 
   return {
     async createClient(client) {
-      await db.collection(CLIENTS).doc(client.client_id).set(client);
+      // OAuthClientInformationFull may carry optional fields set to undefined
+      // by the SDK's DCR handler — strip them before writing to Firestore.
+      await db.collection(CLIENTS).doc(client.client_id).set(stripUndefined(client));
     },
     async getClient(clientId) {
       const snap = await db.collection(CLIENTS).doc(clientId).get();
@@ -256,7 +279,7 @@ export async function createFirestoreStore(database: string): Promise<Store> {
     },
 
     async upsertUser(u) {
-      await db.collection(USERS).doc(u.sub).set(u, { merge: true });
+      await db.collection(USERS).doc(u.sub).set(stripUndefined(u), { merge: true });
     },
     async getUser(sub) {
       const snap = await db.collection(USERS).doc(sub).get();

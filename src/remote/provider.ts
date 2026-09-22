@@ -27,14 +27,27 @@ const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const PENDING_AUTH_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 class ClientsStore implements OAuthRegisteredClientsStore {
-  constructor(private store: Store) {}
+  constructor(
+    private store: Store,
+    private logger: Logger
+  ) {}
 
-  getClient(clientId: string) {
-    return this.store.getClient(clientId);
+  async getClient(clientId: string) {
+    try {
+      return await this.store.getClient(clientId);
+    } catch (err) {
+      this.logger.error({ event: "clientsStore.getClient_error", clientId, err: (err as Error).message, stack: (err as Error).stack }, "getClient failed");
+      throw err;
+    }
   }
 
   async registerClient(client: OAuthClientInformationFull) {
-    await this.store.createClient(client);
+    try {
+      await this.store.createClient(client);
+    } catch (err) {
+      this.logger.error({ event: "clientsStore.registerClient_error", clientId: client.client_id, err: (err as Error).message, stack: (err as Error).stack }, "registerClient failed");
+      throw err;
+    }
     return client;
   }
 }
@@ -47,7 +60,20 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     private store: Store,
     private logger: Logger
   ) {
-    this.clientsStore = new ClientsStore(store);
+    this.clientsStore = new ClientsStore(store, logger);
+  }
+
+  /** Small helper: log any thrown error under the given method name, then rethrow. */
+  private async logged<T>(method: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      this.logger.error(
+        { event: `provider.${method}_error`, err: (err as Error).message, stack: (err as Error).stack },
+        `${method} threw`
+      );
+      throw err;
+    }
   }
 
   /** Persist a pending auth and redirect the user to Google's consent screen. */
@@ -75,9 +101,11 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     _client: OAuthClientInformationFull,
     authorizationCode: string
   ): Promise<string> {
-    const rec = await this.store.getAuthCode(sha256(authorizationCode));
-    if (!rec) throw new InvalidGrantError("Invalid or expired authorization code.");
-    return rec.codeChallenge;
+    return this.logged("challengeForAuthorizationCode", async () => {
+      const rec = await this.store.getAuthCode(sha256(authorizationCode));
+      if (!rec) throw new InvalidGrantError("Invalid or expired authorization code.");
+      return rec.codeChallenge;
+    });
   }
 
   /** Single-use exchange of our auth code for an access + refresh token pair. */
@@ -85,15 +113,17 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     authorizationCode: string
   ): Promise<OAuthTokens> {
-    const codeHash = sha256(authorizationCode);
-    const rec = await this.store.getAuthCode(codeHash);
-    if (!rec) throw new InvalidGrantError("Invalid or expired authorization code.");
-    // Single-use: delete immediately so a replay fails.
-    await this.store.deleteAuthCode(codeHash);
-    if (rec.clientId !== client.client_id) {
-      throw new InvalidGrantError("Authorization code was issued to a different client.");
-    }
-    return this.issueTokens(rec.sub, client.client_id, rec.scopes, rec.resource);
+    return this.logged("exchangeAuthorizationCode", async () => {
+      const codeHash = sha256(authorizationCode);
+      const rec = await this.store.getAuthCode(codeHash);
+      if (!rec) throw new InvalidGrantError("Invalid or expired authorization code.");
+      // Single-use: delete immediately so a replay fails.
+      await this.store.deleteAuthCode(codeHash);
+      if (rec.clientId !== client.client_id) {
+        throw new InvalidGrantError("Authorization code was issued to a different client.");
+      }
+      return this.issueTokens(rec.sub, client.client_id, rec.scopes, rec.resource);
+    });
   }
 
   /** Rotating refresh: the presented refresh token is consumed and replaced. */
@@ -102,45 +132,51 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     refreshToken: string,
     scopes?: string[]
   ): Promise<OAuthTokens> {
-    const rec = await this.store.takeRefreshToken(sha256(refreshToken));
-    if (!rec) throw new InvalidGrantError("Invalid or expired refresh token.");
-    if (rec.clientId !== client.client_id) {
-      throw new InvalidGrantError("Refresh token was issued to a different client.");
-    }
-    // Never widen scope on refresh.
-    const nextScopes =
-      scopes && scopes.length > 0
-        ? scopes.filter((s) => rec.scopes.includes(s))
-        : rec.scopes;
-    return this.issueTokens(rec.sub, client.client_id, nextScopes, rec.resource);
+    return this.logged("exchangeRefreshToken", async () => {
+      const rec = await this.store.takeRefreshToken(sha256(refreshToken));
+      if (!rec) throw new InvalidGrantError("Invalid or expired refresh token.");
+      if (rec.clientId !== client.client_id) {
+        throw new InvalidGrantError("Refresh token was issued to a different client.");
+      }
+      // Never widen scope on refresh.
+      const nextScopes =
+        scopes && scopes.length > 0
+          ? scopes.filter((s) => rec.scopes.includes(s))
+          : rec.scopes;
+      return this.issueTokens(rec.sub, client.client_id, nextScopes, rec.resource);
+    });
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const rec = await this.store.getAccessToken(sha256(token));
-    if (!rec) throw new InvalidTokenError("Access token is invalid or expired.");
-    return {
-      token,
-      clientId: rec.clientId,
-      scopes: rec.scopes,
-      expiresAt: Math.floor(rec.expiresAt / 1000),
-      resource: rec.resource ? new URL(rec.resource) : undefined,
-      extra: { sub: rec.sub },
-    };
+    return this.logged("verifyAccessToken", async () => {
+      const rec = await this.store.getAccessToken(sha256(token));
+      if (!rec) throw new InvalidTokenError("Access token is invalid or expired.");
+      return {
+        token,
+        clientId: rec.clientId,
+        scopes: rec.scopes,
+        expiresAt: Math.floor(rec.expiresAt / 1000),
+        resource: rec.resource ? new URL(rec.resource) : undefined,
+        extra: { sub: rec.sub },
+      };
+    });
   }
 
   async revokeToken(
     _client: OAuthClientInformationFull,
     request: OAuthTokenRevocationRequest
   ): Promise<void> {
-    const hash = sha256(request.token);
-    // We don't know which kind it is; clear both. Invalidate the user's cache
-    // if we can identify them from an access token record.
-    const access = await this.store.getAccessToken(hash);
-    if (access) invalidateUserClients(access.sub);
-    await Promise.all([
-      this.store.deleteAccessToken(hash),
-      this.store.deleteRefreshToken(hash),
-    ]);
+    return this.logged("revokeToken", async () => {
+      const hash = sha256(request.token);
+      // We don't know which kind it is; clear both. Invalidate the user's cache
+      // if we can identify them from an access token record.
+      const access = await this.store.getAccessToken(hash);
+      if (access) invalidateUserClients(access.sub);
+      await Promise.all([
+        this.store.deleteAccessToken(hash),
+        this.store.deleteRefreshToken(hash),
+      ]);
+    });
   }
 
   private async issueTokens(

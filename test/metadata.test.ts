@@ -28,9 +28,9 @@ describe("well-known metadata", () => {
     expect(res.body.scopes_supported).toContain("sheets");
   });
 
-  it("healthz returns 200", async () => {
+  it("/health returns 200", async () => {
     const { app } = buildApp();
-    const res = await request(app).get("/healthz");
+    const res = await request(app).get("/health");
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
   });

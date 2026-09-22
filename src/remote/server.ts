@@ -1,4 +1,4 @@
-import express, { type Request, type Response } from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -207,7 +207,8 @@ export function createApp(deps: AppDeps): express.Express {
   // -------------------------------------------------------------------------
   // Misc
   // -------------------------------------------------------------------------
-  app.get("/healthz", (_req, res) => {
+  // /health (Cloud Run's own frontend hijacks /healthz)
+  app.get("/health", (_req, res) => {
     res.status(200).json({ ok: true });
   });
 
@@ -220,6 +221,21 @@ export function createApp(deps: AppDeps): express.Express {
           `MCP endpoint: ${config.mcpResourceUrl}\n` +
           "Add as a custom connector in claude.ai. See README for setup.\n"
       );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Global error handler — must be last, after all routes.
+  // Logs the error (message + stack only; never req body/headers) via pino and
+  // returns a 500 JSON so the SDK's "server_error" response is at least logged.
+  // ---------------------------------------------------------------------------
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    logger.error({ event: "unhandled_error", err: message, stack }, "Unhandled Express error");
+    if (!res.headersSent) {
+      res.status(500).json({ error: "server_error", error_description: "Internal Server Error" });
+    }
   });
 
   return app;
