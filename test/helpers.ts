@@ -75,7 +75,7 @@ export async function challengeFor(verifier: string): Promise<string> {
  */
 export async function authorizeUntilCode(
   ctx: ReturnType<typeof buildApp>,
-  opts: { email: string; sub?: string; clientState?: string }
+  opts: { email: string; sub?: string; clientState?: string; resource?: string; omitScope?: boolean }
 ) {
   const { app } = ctx;
   const reg = await registerClient(app);
@@ -95,8 +95,8 @@ export async function authorizeUntilCode(
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
       state: clientState,
-      scope: "sheets",
-      resource: "https://mcp.example.com/mcp",
+      scope: opts.omitScope ? undefined : "sheets",
+      resource: opts.resource ?? "https://mcp.example.com/mcp",
     });
 
   const googleUrl = new URL(authRes.headers.location);

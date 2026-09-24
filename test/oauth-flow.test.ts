@@ -51,6 +51,23 @@ describe("dynamic client registration + authorize", () => {
     expect(pendingId).toBeTruthy();
     expect(pendingId).not.toBe("abc123");
   });
+
+  it("rejects missing or foreign MCP resource indicators", async () => {
+    const ctx = buildApp();
+    const reg = await registerClient(ctx.app);
+    const query = {
+      response_type: "code", client_id: reg.body.client_id,
+      redirect_uri: CLIENT_REDIRECT,
+      code_challenge: await challengeFor("verifier-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFatta"),
+      code_challenge_method: "S256", scope: "sheets",
+    };
+    for (const resource of [undefined, "https://evil.example/mcp", "https://mcp.example.com/mcp/other"]) {
+      const res = await request(ctx.app).get("/authorize").query({ ...query, resource });
+      expect(res.status).toBe(302);
+      const redirect = new URL(res.headers.location);
+      expect(redirect.searchParams.get("error")).toBe("invalid_target");
+    }
+  });
 });
 
 describe("google callback domain enforcement", () => {
@@ -131,6 +148,72 @@ describe("/token authorization_code + PKCE", () => {
     const reuse = await redeem(ctx, { clientId, clientSecret, code, verifier });
     expect(reuse.status).toBeGreaterThanOrEqual(400);
   });
+
+  it("cannot exchange a read code for a full-access resource", async () => {
+    const ctx = buildApp();
+    const { clientId, clientSecret, verifier, cbRes } = await authorizeUntilCode(ctx, {
+      email: "user@example.com", resource: "https://mcp.example.com/mcp/read",
+    });
+    const code = new URL(cbRes.headers.location).searchParams.get("code")!;
+    const res = await request(ctx.app).post("/token").type("form").send({
+      grant_type: "authorization_code", code, redirect_uri: CLIENT_REDIRECT,
+      client_id: clientId, client_secret: clientSecret, code_verifier: verifier,
+      resource: "https://mcp.example.com/mcp",
+    });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body.access_token).toBeUndefined();
+  });
+
+  it("redeems an authorization code only once under concurrent HTTP requests", async () => {
+    const ctx = buildApp();
+    const { clientId, clientSecret, verifier, cbRes } = await authorizeUntilCode(ctx, {
+      email: "user@example.com",
+    });
+    const code = new URL(cbRes.headers.location).searchParams.get("code")!;
+    const responses = await Promise.all(Array.from({ length: 6 }, () =>
+      redeem(ctx, { clientId, clientSecret, code, verifier })
+    ));
+    expect(responses.filter((res) => res.status === 200)).toHaveLength(1);
+    expect(responses.filter((res) => res.status >= 400)).toHaveLength(5);
+  });
+
+  it("allows a read-resource OAuth token only at the read endpoint", async () => {
+    const ctx = buildApp();
+    const { clientId, clientSecret, verifier, cbRes } = await authorizeUntilCode(ctx, {
+      email: "user@example.com", resource: "https://mcp.example.com/mcp/read",
+    });
+    const code = new URL(cbRes.headers.location).searchParams.get("code")!;
+    const tokenRes = await request(ctx.app).post("/token").type("form").send({
+      grant_type: "authorization_code", code, redirect_uri: CLIENT_REDIRECT,
+      client_id: clientId, client_secret: clientSecret, code_verifier: verifier,
+      resource: "https://mcp.example.com/mcp/read",
+    });
+    expect(tokenRes.status).toBe(200);
+    const token = tokenRes.body.access_token as string;
+    for (const [path, status] of [["/mcp/read", 200], ["/mcp/write", 401], ["/mcp", 401]] as const) {
+      const res = await request(ctx.app).post(path)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Accept", "application/json, text/event-stream")
+        .send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+      expect(res.status).toBe(status);
+    }
+  });
+
+  it("defaults an omitted OAuth scope to sheets", async () => {
+    const ctx = buildApp();
+    const { clientId, clientSecret, verifier, cbRes } = await authorizeUntilCode(ctx, {
+      email: "user@example.com", omitScope: true,
+    });
+    const code = new URL(cbRes.headers.location).searchParams.get("code")!;
+    const tokenRes = await redeem(ctx, { clientId, clientSecret, code, verifier });
+    expect(tokenRes.status).toBe(200);
+    expect(tokenRes.body.scope).toBe("sheets");
+    const mcpRes = await request(ctx.app).post("/mcp")
+      .set("Authorization", `Bearer ${tokenRes.body.access_token}`)
+      .set("Accept", "application/json, text/event-stream")
+      .send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    expect(mcpRes.status).toBe(200);
+  });
 });
 
 describe("/token refresh rotation", () => {
@@ -175,5 +258,25 @@ describe("/token refresh rotation", () => {
     // Old refresh token is now invalid
     const replay = await rotate(refresh1);
     expect(replay.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("cannot rotate a read refresh token into a full-access token", async () => {
+    const ctx = buildApp();
+    const { clientId, clientSecret, verifier, cbRes } = await authorizeUntilCode(ctx, {
+      email: "user@example.com", resource: "https://mcp.example.com/mcp/read",
+    });
+    const code = new URL(cbRes.headers.location).searchParams.get("code")!;
+    const first = await request(ctx.app).post("/token").type("form").send({
+      grant_type: "authorization_code", code, redirect_uri: CLIENT_REDIRECT,
+      client_id: clientId, client_secret: clientSecret, code_verifier: verifier,
+    });
+    expect(first.status).toBe(200);
+    const escalated = await request(ctx.app).post("/token").type("form").send({
+      grant_type: "refresh_token", refresh_token: first.body.refresh_token,
+      client_id: clientId, client_secret: clientSecret,
+      resource: "https://mcp.example.com/mcp",
+    });
+    expect(escalated.status).toBeGreaterThanOrEqual(400);
+    expect(escalated.body.access_token).toBeUndefined();
   });
 });

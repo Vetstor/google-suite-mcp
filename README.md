@@ -199,7 +199,12 @@ export ALLOWED_DOMAINS=example.com          # comma-separated; omit to allow all
 bash deploy/deploy.sh
 ```
 The script enables APIs, creates the Firestore database, generates the token-encryption key and
-stores both secrets in Secret Manager, grants IAM, deploys, and prints your **service URL**.
+stores both secrets in Secret Manager, creates a dedicated Cloud Run runtime service account,
+grants it Firestore access and access to only those two secrets, deploys, and prints your
+**service URL**. Set `RUNTIME_SA_NAME` to override its default name (`sheets-mcp-runtime`).
+On an existing deployment, rerunning the script switches Cloud Run to this account. The script
+does not remove grants from the old default service account; audit its other workloads before
+revoking those grants manually.
 
 > **New-project build fails with a permissions error?** Grant the Cloud Build role and re-run:
 > ```bash
@@ -254,11 +259,20 @@ The remote server exposes three MCP endpoints with different permission levels:
 
 Each endpoint has its own OAuth protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp/<endpoint>`, so clients can discover
-which scopes are required automatically.
+which scopes are required automatically. Access and refresh tokens are bound to the
+specific endpoint used during authorization. Reconnect the connector when switching
+endpoints; older tokens without a resource binding also need a fresh connection.
 
 **Suggested rollout:** point most users at `/mcp/write` — they can read, create,
 and edit documents but cannot delete sheets/slides/items or run raw batch-update
-requests. Reserve `/mcp` for power users who need the full surface.
+requests, update Apps Script code, deploy scripts, or run script functions. Reserve
+`/mcp` for users who need the full surface. Ordinary write tools can still overwrite
+document or spreadsheet content.
+
+These tiers restrict the tools available **within the chosen connector**. They do not
+assign server-side admin roles: an allowed user who knows the `/mcp` URL can connect
+to it directly. All endpoints request the same Google scopes, so Google permissions
+are not reduced by choosing `/mcp/read` or `/mcp/write`.
 
 **Tool annotations:** every tool carries MCP `ToolAnnotations` derived from its
 tier (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`),
@@ -270,11 +284,10 @@ tool registration layer, so the same tier-filtering logic applies in headless mo
 
 ## For admins
 
-- **What users can do:** exactly what their own Google account can — read/write the Sheets, Docs,
-  Slides, Forms and Apps Script files they already have access to. No user can reach anything they
-  couldn't open in Drive themselves.
-- **What they can't:** log in from outside `ALLOWED_DOMAINS` (403, nothing stored); access other
-  people's private files; run arbitrary Apps Script that isn't theirs.
+- **What users can do:** at most what their own Google account allows on Sheets, Docs, Slides,
+  Forms and Apps Script files they can access; their chosen endpoint may expose fewer tools.
+- **What they can't:** log in from outside `ALLOWED_DOMAINS` (403, no user token stored) or
+  access files their Google account cannot access.
 - **Revoke access** — per user: they visit <https://myaccount.google.com/permissions> and remove the
   app, or you disable the connector org-wide in claude.ai. `/revoke` (RFC 7009) drops the cached
   Google client immediately.
@@ -284,7 +297,7 @@ tool registration layer, so the same tier-filtering logic applies in headless mo
   tier for small orgs. Expect ~**$0/month** at low volume.
 - **Where tokens live** — in **your** GCP project's Firestore. Each user's Google refresh token is
   **AES-256-GCM encrypted** at rest; your own access/refresh tokens are stored only as SHA-256
-  hashes. Nothing is sent to third parties.
+  hashes. Tool results are returned to the connected MCP client (for example, Claude).
 - **Rotate the OAuth secret** — create a new secret in the console, then:
   ```bash
   printf '%s' 'NEW_SECRET' | gcloud secrets versions add sheets-mcp-google-client-secret --data-file=-

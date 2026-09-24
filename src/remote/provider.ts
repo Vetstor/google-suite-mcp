@@ -12,6 +12,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import {
   InvalidGrantError,
+  InvalidTargetError,
   InvalidTokenError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { Config } from "./config.js";
@@ -63,6 +64,18 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     this.clientsStore = new ClientsStore(store, logger);
   }
 
+  private allowedResource(resource: string | undefined): string {
+    const allowed = [
+      this.config.mcpResourceUrl,
+      `${this.config.baseUrl}/mcp/write`,
+      `${this.config.baseUrl}/mcp/read`,
+    ];
+    if (!resource || !allowed.includes(resource)) {
+      throw new InvalidTargetError("Specify one of this server's MCP resource URLs.");
+    }
+    return resource;
+  }
+
   /** Small helper: log any thrown error under the given method name, then rethrow. */
   private async logged<T>(method: string, fn: () => Promise<T>): Promise<T> {
     try {
@@ -82,6 +95,7 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     params: AuthorizationParams,
     res: Response
   ): Promise<void> {
+    const resource = this.allowedResource(params.resource?.href);
     const id = randomToken(24);
     await this.store.createPendingAuth({
       id,
@@ -89,8 +103,8 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
       state: params.state,
-      scopes: params.scopes ?? MCP_SCOPES,
-      resource: params.resource?.href,
+      scopes: params.scopes?.length ? params.scopes : MCP_SCOPES,
+      resource,
       expiresAt: Date.now() + PENDING_AUTH_TTL_MS,
     });
     res.redirect(302, buildGoogleAuthUrl(this.config, id));
@@ -111,18 +125,23 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
   /** Single-use exchange of our auth code for an access + refresh token pair. */
   async exchangeAuthorizationCode(
     client: OAuthClientInformationFull,
-    authorizationCode: string
+    authorizationCode: string,
+    _codeVerifier?: string,
+    redirectUri?: string,
+    resource?: URL
   ): Promise<OAuthTokens> {
     return this.logged("exchangeAuthorizationCode", async () => {
       const codeHash = sha256(authorizationCode);
-      const rec = await this.store.getAuthCode(codeHash);
+      const rec = await this.store.takeAuthCode(codeHash);
       if (!rec) throw new InvalidGrantError("Invalid or expired authorization code.");
-      // Single-use: delete immediately so a replay fails.
-      await this.store.deleteAuthCode(codeHash);
       if (rec.clientId !== client.client_id) {
         throw new InvalidGrantError("Authorization code was issued to a different client.");
       }
-      return this.issueTokens(rec.sub, client.client_id, rec.scopes, rec.resource);
+      if ((redirectUri && redirectUri !== rec.redirectUri) ||
+          (resource && resource.href !== rec.resource)) {
+        throw new InvalidGrantError("Authorization code parameters do not match the original request.");
+      }
+      return this.issueTokens(rec.sub, client.client_id, rec.scopes, this.allowedResource(rec.resource));
     });
   }
 
@@ -130,13 +149,17 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
   async exchangeRefreshToken(
     client: OAuthClientInformationFull,
     refreshToken: string,
-    scopes?: string[]
+    scopes?: string[],
+    resource?: URL
   ): Promise<OAuthTokens> {
     return this.logged("exchangeRefreshToken", async () => {
       const rec = await this.store.takeRefreshToken(sha256(refreshToken));
       if (!rec) throw new InvalidGrantError("Invalid or expired refresh token.");
       if (rec.clientId !== client.client_id) {
         throw new InvalidGrantError("Refresh token was issued to a different client.");
+      }
+      if (resource && resource.href !== rec.resource) {
+        throw new InvalidGrantError("Refresh token cannot be used for a different resource.");
       }
       // Reject if the user's granted scopes are stale (Google scope set changed
       // since they consented). They must re-run OAuth to grant the new scopes.
@@ -151,7 +174,7 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
         scopes && scopes.length > 0
           ? scopes.filter((s) => rec.scopes.includes(s))
           : rec.scopes;
-      return this.issueTokens(rec.sub, client.client_id, nextScopes, rec.resource);
+      return this.issueTokens(rec.sub, client.client_id, nextScopes, this.allowedResource(rec.resource));
     });
   }
 

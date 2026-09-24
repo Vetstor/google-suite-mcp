@@ -82,7 +82,8 @@ async function seedToken(
   store: ReturnType<typeof buildApp>["store"],
   token: string,
   sub: string,
-  scopeVersion: string | undefined
+  scopeVersion: string | undefined,
+  resource = "https://mcp.example.com/mcp"
 ) {
   await store.upsertUser({
     sub,
@@ -96,7 +97,7 @@ async function seedToken(
     sub,
     clientId: "client-1",
     scopes: ["sheets"],
-    resource: "https://mcp.example.com/mcp",
+    resource,
     expiresAt: Date.now() + 3600_000,
   });
 }
@@ -251,7 +252,7 @@ describe("tiered MCP endpoints", () => {
   it("/mcp/read returns only read tools", async () => {
     const { app, store } = buildApp();
     const token = "tier-read-token";
-    await seedToken(store, token, "sub-tier-read", SCOPE_VERSION);
+    await seedToken(store, token, "sub-tier-read", SCOPE_VERSION, "https://mcp.example.com/mcp/read");
     const names = await listToolsOn("/mcp/read", token, app);
     expect(names).toHaveLength(READ_TOOL_NAMES.length);
     for (const name of names) {
@@ -266,11 +267,42 @@ describe("tiered MCP endpoints", () => {
   it("/mcp/write returns read + write tools but not destructive", async () => {
     const { app, store } = buildApp();
     const token = "tier-write-token";
-    await seedToken(store, token, "sub-tier-write", SCOPE_VERSION);
+    await seedToken(store, token, "sub-tier-write", SCOPE_VERSION, "https://mcp.example.com/mcp/write");
     const names = await listToolsOn("/mcp/write", token, app);
     expect(names).toHaveLength(READ_TOOL_NAMES.length + WRITE_TOOL_NAMES.length);
     for (const dn of DESTRUCTIVE_TOOL_NAMES) {
       expect(names).not.toContain(dn);
+    }
+    for (const name of ["update_script_content", "create_script_deployment", "run_script_function"]) {
+      expect(names).not.toContain(name);
+    }
+  });
+
+  it("rejects a read token at write and full-access endpoints", async () => {
+    const { app, store } = buildApp();
+    const token = "read-bound-token";
+    await seedToken(store, token, "sub-read-bound", SCOPE_VERSION, "https://mcp.example.com/mcp/read");
+    for (const path of ["/mcp/write", "/mcp"]) {
+      const res = await request(app).post(path)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Accept", "application/json, text/event-stream")
+        .send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+      expect(res.status).toBe(401);
+      expect(res.headers["www-authenticate"]).toContain("invalid_token");
+    }
+    expect(await listToolsOn("/mcp/read", token, app)).toHaveLength(READ_TOOL_NAMES.length);
+  });
+
+  it("rejects unbound and full-access tokens at a different endpoint", async () => {
+    const { app, store } = buildApp();
+    await seedToken(store, "unbound-token", "sub-unbound", SCOPE_VERSION, "");
+    await seedToken(store, "full-token", "sub-full", SCOPE_VERSION);
+    for (const [path, token] of [["/mcp", "unbound-token"], ["/mcp/read", "full-token"]]) {
+      const res = await request(app).post(path)
+        .set("Authorization", `Bearer ${token}`)
+        .set("Accept", "application/json, text/event-stream")
+        .send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+      expect(res.status).toBe(401);
     }
   });
 
