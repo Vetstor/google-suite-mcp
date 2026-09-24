@@ -20,6 +20,7 @@
 #   REGION           (default: europe-west1)
 #   FIRESTORE_LOCATION (default: europe-west1)
 #   BASE_URL         override (e.g. a custom domain); otherwise auto-detected
+#   RUNTIME_SA_NAME  dedicated runtime service account id (default: sheets-mcp-runtime)
 #
 set -euo pipefail
 
@@ -30,6 +31,7 @@ SERVICE_NAME="${SERVICE_NAME:-sheets-mcp}"
 REGION="${REGION:-europe-west1}"
 FIRESTORE_LOCATION="${FIRESTORE_LOCATION:-europe-west1}"
 ALLOWED_DOMAINS="${ALLOWED_DOMAINS:-}"
+RUNTIME_SA_NAME="${RUNTIME_SA_NAME:-sheets-mcp-runtime}"
 
 SECRET_CLIENT="sheets-mcp-google-client-secret"
 SECRET_TOKENKEY="sheets-mcp-token-key"
@@ -42,6 +44,7 @@ gcloud services enable \
   run.googleapis.com \
   firestore.googleapis.com \
   secretmanager.googleapis.com \
+  iam.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   sheets.googleapis.com \
@@ -78,11 +81,20 @@ else
   echo "   $SECRET_TOKENKEY already exists (leaving as-is)."
 fi
 
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-RUNTIME_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-echo ">> Granting IAM to runtime service account ($RUNTIME_SA)..."
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+echo ">> Ensuring dedicated runtime service account exists ($RUNTIME_SA)..."
+if ! gcloud iam service-accounts describe "$RUNTIME_SA" >/dev/null 2>&1; then
+  gcloud iam service-accounts create "$RUNTIME_SA_NAME" \
+    --display-name="${SERVICE_NAME} runtime"
+fi
+
+echo ">> Granting runtime access to its two secrets and Firestore..."
+gcloud secrets add-iam-policy-binding "$SECRET_CLIENT" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/secretmanager.secretAccessor" \
+  --condition=None >/dev/null
+gcloud secrets add-iam-policy-binding "$SECRET_TOKENKEY" \
   --member="serviceAccount:${RUNTIME_SA}" \
   --role="roles/secretmanager.secretAccessor" \
   --condition=None >/dev/null
@@ -103,6 +115,7 @@ deploy() {
   gcloud run deploy "$SERVICE_NAME" \
     --source . \
     --region "$REGION" \
+    --service-account "$RUNTIME_SA" \
     --allow-unauthenticated \
     --set-env-vars "BASE_URL=${base_url},${ENV_COMMON}" \
     --set-secrets "$SECRETS"

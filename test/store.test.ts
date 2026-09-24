@@ -92,3 +92,26 @@ describe("MemoryStore.createClient with undefined optional metadata", () => {
     expect(got).toMatchObject({ client_id: "client-002" });
   });
 });
+
+describe("single-use credentials", () => {
+  it("consumes an authorization code at most once under concurrent requests", async () => {
+    const store = new MemoryStore();
+    await store.createAuthCode({
+      codeHash: "code", clientId: "client", codeChallenge: "challenge",
+      redirectUri: "https://example.com/callback", sub: "user", scopes: ["sheets"],
+      resource: "https://example.com/mcp", expiresAt: Date.now() + 60_000,
+    });
+    const results = await Promise.all(Array.from({ length: 8 }, () => store.takeAuthCode("code")));
+    expect(results.filter(Boolean)).toHaveLength(1);
+  });
+
+  it("consumes a refresh token at most once under concurrent requests", async () => {
+    const store = new MemoryStore();
+    await store.createRefreshToken({
+      tokenHash: "refresh", clientId: "client", sub: "user", scopes: ["sheets"],
+      resource: "https://example.com/mcp", expiresAt: Date.now() + 60_000,
+    });
+    const results = await Promise.all(Array.from({ length: 8 }, () => store.takeRefreshToken("refresh")));
+    expect(results.filter(Boolean)).toHaveLength(1);
+  });
+});

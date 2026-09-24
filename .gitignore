@@ -1,9 +1,18 @@
 node_modules/
 dist/
-.env
+.env*
 *.env.local
+!.env.example
 
 # Service account key files — never commit these
 *service-account*.json
 *service_account*.json
+credentials*.json
+credential*.json
+client_secret*.json
+client-secret*.json
+*.pem
+*.p12
+*.pfx
+*.key
 credentials/

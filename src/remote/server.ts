@@ -217,14 +217,24 @@ export function createApp(deps: AppDeps): express.Express {
   };
 
   /** Make a requireBearerAuth middleware pointing at the correct metadata URL. */
-  const makeBearer = (endpointUrl: string) =>
-    requireBearerAuth({
+  const makeBearer = (endpointUrl: string) => {
+    const metadataUrl = getOAuthProtectedResourceMetadataUrl(new URL(endpointUrl));
+    const bearer = requireBearerAuth({
       verifier: provider,
-      requiredScopes: [],
-      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(
-        new URL(endpointUrl)
-      ),
+      requiredScopes: MCP_SCOPES,
+      resourceMetadataUrl: metadataUrl,
     });
+    return (req: Request, res: Response, next: NextFunction) => {
+      bearer(req, res, () => {
+        if (req.auth?.resource?.href !== endpointUrl) {
+          res.set("WWW-Authenticate", `Bearer error="invalid_token", resource_metadata="${metadataUrl}"`);
+          res.status(401).json({ error: "invalid_token", error_description: "Token is not valid for this MCP resource." });
+          return;
+        }
+        next();
+      });
+    };
+  };
 
   // /mcp — all tiers
   const bearerAll = makeBearer(config.mcpResourceUrl);

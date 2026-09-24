@@ -73,6 +73,7 @@ export interface Store {
   // Our authorization codes
   createAuthCode(a: AuthCodeRecord): Promise<void>;
   getAuthCode(codeHash: string): Promise<AuthCodeRecord | undefined>;
+  takeAuthCode(codeHash: string): Promise<AuthCodeRecord | undefined>;
   deleteAuthCode(codeHash: string): Promise<void>;
 
   // Access & refresh tokens (only hashes stored)
@@ -145,6 +146,11 @@ export class MemoryStore implements Store {
   }
   async getAuthCode(codeHash: string) {
     return fresh(this.authCodes.get(codeHash));
+  }
+  async takeAuthCode(codeHash: string) {
+    const rec = fresh(this.authCodes.get(codeHash));
+    this.authCodes.delete(codeHash);
+    return rec;
   }
   async deleteAuthCode(codeHash: string): Promise<void> {
     this.authCodes.delete(codeHash);
@@ -246,9 +252,11 @@ export async function createFirestoreStore(database: string): Promise<Store> {
     },
     async takePendingAuth(id) {
       const ref = db.collection(PENDING).doc(id);
-      const snap = await ref.get();
-      await ref.delete();
-      return fromDoc<PendingAuth>(snap.data());
+      return db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.exists) tx.delete(ref);
+        return fromDoc<PendingAuth>(snap.data());
+      });
     },
 
     async createAuthCode(a) {
@@ -257,6 +265,14 @@ export async function createFirestoreStore(database: string): Promise<Store> {
     async getAuthCode(codeHash) {
       const snap = await db.collection(AUTH_CODES).doc(codeHash).get();
       return fromDoc<AuthCodeRecord>(snap.data());
+    },
+    async takeAuthCode(codeHash) {
+      const ref = db.collection(AUTH_CODES).doc(codeHash);
+      return db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.exists) tx.delete(ref);
+        return fromDoc<AuthCodeRecord>(snap.data());
+      });
     },
     async deleteAuthCode(codeHash) {
       await db.collection(AUTH_CODES).doc(codeHash).delete();
@@ -278,9 +294,11 @@ export async function createFirestoreStore(database: string): Promise<Store> {
     },
     async takeRefreshToken(tokenHash) {
       const ref = db.collection(REFRESH).doc(tokenHash);
-      const snap = await ref.get();
-      await ref.delete();
-      return fromDoc<RefreshTokenRecord>(snap.data());
+      return db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.exists) tx.delete(ref);
+        return fromDoc<RefreshTokenRecord>(snap.data());
+      });
     },
     async deleteRefreshToken(tokenHash) {
       await db.collection(REFRESH).doc(tokenHash).delete();

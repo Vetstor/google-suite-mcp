@@ -97,7 +97,7 @@ describe("TOOL_TIERS coverage", () => {
     expect(readTools).toContain("get_script_processes");
   });
 
-  it("destructive-tier tools are the raw batchUpdate + delete tools", () => {
+  it("destructive-tier tools include raw updates, deletes, and script execution", () => {
     const destructive = Object.entries(TOOL_TIERS)
       .filter(([, t]) => t === "destructive")
       .map(([n]) => n)
@@ -111,6 +111,9 @@ describe("TOOL_TIERS coverage", () => {
     expect(destructive).toContain("delete_slide");
     expect(destructive).toContain("delete_item");
     expect(destructive).toContain("clear_range");
+    expect(destructive).toContain("update_script_content");
+    expect(destructive).toContain("create_script_deployment");
+    expect(destructive).toContain("run_script_function");
     // No write tools in destructive
     for (const name of destructive) {
       expect(TOOL_TIERS[name]).toBe("destructive");
