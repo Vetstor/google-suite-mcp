@@ -3,6 +3,7 @@ import request from "supertest";
 import { buildApp, authorizeUntilCode, CLIENT_REDIRECT } from "./helpers.js";
 import { sha256 } from "../src/remote/crypto.js";
 import { SCOPE_VERSION } from "../src/remote/config.js";
+import { TOOL_TIERS } from "../src/tools/tiers.js";
 
 const EXPECTED_TOOLS = [
   // Sheets
@@ -201,5 +202,104 @@ describe("scope-version enforcement", () => {
 
     expect(refreshRes.status).toBeGreaterThanOrEqual(400);
     expect(refreshRes.body.error).toBe("invalid_grant");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tiered endpoints
+// ---------------------------------------------------------------------------
+
+const READ_TOOL_NAMES = Object.entries(TOOL_TIERS)
+  .filter(([, t]) => t === "read")
+  .map(([n]) => n);
+
+const DESTRUCTIVE_TOOL_NAMES = Object.entries(TOOL_TIERS)
+  .filter(([, t]) => t === "destructive")
+  .map(([n]) => n);
+
+const WRITE_TOOL_NAMES = Object.entries(TOOL_TIERS)
+  .filter(([, t]) => t === "write")
+  .map(([n]) => n);
+
+async function listToolsOn(
+  path: string,
+  token: string,
+  app: ReturnType<typeof buildApp>["app"]
+): Promise<string[]> {
+  const res = await request(app)
+    .post(path)
+    .set("Authorization", `Bearer ${token}`)
+    .set("Accept", "application/json, text/event-stream")
+    .set("Content-Type", "application/json")
+    .send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  expect(res.status).toBe(200);
+  const msgs = parseSse(res.text);
+  const msg = msgs.find((m) => m.id === 1);
+  return (msg?.result?.tools as Array<{ name: string }>).map((t) => t.name);
+}
+
+describe("tiered MCP endpoints", () => {
+  it("/mcp returns all 48 tools", async () => {
+    const { app, store } = buildApp();
+    const token = "tier-all-token";
+    await seedToken(store, token, "sub-tier-all", SCOPE_VERSION);
+    const names = await listToolsOn("/mcp", token, app);
+    expect(names).toHaveLength(EXPECTED_TOOLS.length);
+    expect(names.sort()).toEqual([...EXPECTED_TOOLS].sort());
+  });
+
+  it("/mcp/read returns only read tools", async () => {
+    const { app, store } = buildApp();
+    const token = "tier-read-token";
+    await seedToken(store, token, "sub-tier-read", SCOPE_VERSION);
+    const names = await listToolsOn("/mcp/read", token, app);
+    expect(names).toHaveLength(READ_TOOL_NAMES.length);
+    for (const name of names) {
+      expect(TOOL_TIERS[name]).toBe("read");
+    }
+    // No write or destructive tools
+    for (const wn of [...WRITE_TOOL_NAMES, ...DESTRUCTIVE_TOOL_NAMES]) {
+      expect(names).not.toContain(wn);
+    }
+  });
+
+  it("/mcp/write returns read + write tools but not destructive", async () => {
+    const { app, store } = buildApp();
+    const token = "tier-write-token";
+    await seedToken(store, token, "sub-tier-write", SCOPE_VERSION);
+    const names = await listToolsOn("/mcp/write", token, app);
+    expect(names).toHaveLength(READ_TOOL_NAMES.length + WRITE_TOOL_NAMES.length);
+    for (const dn of DESTRUCTIVE_TOOL_NAMES) {
+      expect(names).not.toContain(dn);
+    }
+  });
+
+  it("/mcp/read protected-resource metadata has resource ending in /mcp/read", async () => {
+    const { app } = buildApp();
+    const res = await request(app).get(
+      "/.well-known/oauth-protected-resource/mcp/read"
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { resource: string }).resource).toMatch(/\/mcp\/read$/);
+  });
+
+  it("/mcp/write protected-resource metadata has resource ending in /mcp/write", async () => {
+    const { app } = buildApp();
+    const res = await request(app).get(
+      "/.well-known/oauth-protected-resource/mcp/write"
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { resource: string }).resource).toMatch(/\/mcp\/write$/);
+  });
+
+  it("/mcp/read 401 WWW-Authenticate points to /mcp/read protected-resource metadata", async () => {
+    const { app } = buildApp();
+    const res = await request(app)
+      .post("/mcp/read")
+      .set("Accept", "application/json, text/event-stream")
+      .send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers["www-authenticate"] as string;
+    expect(wwwAuth).toContain("oauth-protected-resource/mcp/read");
   });
 });

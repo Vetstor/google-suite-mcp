@@ -1,10 +1,10 @@
 import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { script_v1 } from "googleapis";
 import {
   handleGoogleError,
   jsonResult,
-  type GetClients,
+  defineTool,
+  type RegisterCtx,
 } from "../helpers.js";
 
 const MANIFEST_NAME = "appsscript";
@@ -20,14 +20,6 @@ const ScriptFile = z.object({
 });
 type ScriptFile = z.infer<typeof ScriptFile>;
 
-/**
- * Merge caller-provided files onto the project's existing files.
- * - replaceAll=false: start from existing, replace same-name files, add new.
- * - replaceAll=true: use exactly the provided set.
- * In both modes the required `appsscript` JSON manifest is preserved: if the
- * caller omits it, the existing manifest is carried over (updateContent rejects
- * a project with no manifest). Exported for unit testing.
- */
 export function mergeScriptFiles(
   existing: script_v1.Schema$File[],
   provided: ScriptFile[],
@@ -43,7 +35,6 @@ export function mergeScriptFiles(
     else result.push({ ...file });
   }
 
-  // Always keep the manifest.
   if (!result.some((f) => f.name === MANIFEST_NAME)) {
     const existingManifest = existing.find((f) => f.name === MANIFEST_NAME);
     if (existingManifest) {
@@ -57,34 +48,37 @@ export function mergeScriptFiles(
   return result;
 }
 
-/** Shared hint for the Apps Script API run/permission constraints. */
 const RUN_HINT =
   "Note: scripts.run only works when the script's GCP project matches this server's OAuth client project AND the script has an 'API Executable' deployment; most user scripts do not qualify. Each user must also enable the Apps Script API at https://script.google.com/home/usersettings.";
 
-export function registerScriptTools(server: McpServer, getClients: GetClients) {
-  server.tool(
+export function registerScriptTools(ctx: RegisterCtx) {
+  defineTool(
+    ctx,
     "list_script_projects",
-    "List Google Apps Script projects accessible to the caller. Optionally filter by name (substring) or Drive folder.",
     {
-      query: z
-        .string()
-        .optional()
-        .describe("Name substring to search for (case-insensitive)."),
-      folderId: z
-        .string()
-        .optional()
-        .describe("Restrict to a specific Drive folder ID."),
-      pageSize: z
-        .number()
-        .int()
-        .min(1)
-        .max(1000)
-        .default(50)
-        .describe("Max results to return (default 50)."),
+      description:
+        "List Google Apps Script projects accessible to the caller. Optionally filter by name (substring) or Drive folder.",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Name substring to search for (case-insensitive)."),
+        folderId: z
+          .string()
+          .optional()
+          .describe("Restrict to a specific Drive folder ID."),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .default(50)
+          .describe("Max results to return (default 50)."),
+      },
     },
     async ({ query, folderId, pageSize }) => {
       try {
-        const { drive } = await getClients();
+        const { drive } = await ctx.getClients();
         let q = "mimeType='application/vnd.google-apps.script' and trashed=false";
         if (query) q += ` and name contains '${query.replace(/'/g, "\\'")}'`;
         if (folderId) q += ` and '${folderId}' in parents`;
@@ -101,21 +95,25 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "create_script_project",
-    "Create a new Apps Script project. Pass parentId (a Sheet/Doc/Form/Slides file ID) to create a container-bound script; omit it for a standalone script. Returns {scriptId, editorUrl}.",
     {
-      title: z.string().describe("Title of the new script project."),
-      parentId: z
-        .string()
-        .optional()
-        .describe(
-          "Drive ID of a Sheet/Doc/Form/Slides file to bind the script to (standalone if omitted)."
-        ),
+      description:
+        "Create a new Apps Script project. Pass parentId (a Sheet/Doc/Form/Slides file ID) to create a container-bound script; omit it for a standalone script. Returns {scriptId, editorUrl}.",
+      inputSchema: {
+        title: z.string().describe("Title of the new script project."),
+        parentId: z
+          .string()
+          .optional()
+          .describe(
+            "Drive ID of a Sheet/Doc/Form/Slides file to bind the script to (standalone if omitted)."
+          ),
+      },
     },
     async ({ title, parentId }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.projects.create({
           requestBody: { title, parentId },
         });
@@ -130,15 +128,19 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "get_script_project",
-    "Get an Apps Script project's metadata + source files: {scriptId, title, parentId?, files:[{name, type (SERVER_JS|JSON|HTML), source}]}.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
+      description:
+        "Get an Apps Script project's metadata + source files: {scriptId, title, parentId?, files:[{name, type (SERVER_JS|JSON|HTML), source}]}.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+      },
     },
     async ({ scriptId }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const [meta, content] = await Promise.all([
           script.projects.get({ scriptId }),
           script.projects.getContent({ scriptId }),
@@ -160,20 +162,28 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "update_script_content",
-    "Update an Apps Script project's files. By default this MERGES: existing files are fetched, files with the same name are replaced, new files are added, and untouched files are kept. The required 'appsscript' JSON manifest is always preserved (carried over if you omit it). Set replaceAll=true to send exactly the provided set instead (the manifest is still carried over if omitted). Returns the resulting file names.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
-      files: z.array(ScriptFile).describe("Files to write (name has no extension)."),
-      replaceAll: z
-        .boolean()
-        .default(false)
-        .describe("Replace the whole file set instead of merging (default false)."),
+      description:
+        "Update an Apps Script project's files. By default this MERGES: existing files are fetched, files with the same name are replaced, new files are added, and untouched files are kept. The required 'appsscript' JSON manifest is always preserved (carried over if you omit it). Set replaceAll=true to send exactly the provided set instead (the manifest is still carried over if omitted). Returns the resulting file names.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+        files: z
+          .array(ScriptFile)
+          .describe("Files to write (name has no extension)."),
+        replaceAll: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Replace the whole file set instead of merging (default false)."
+          ),
+      },
     },
     async ({ scriptId, files, replaceAll }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const current = await script.projects.getContent({ scriptId });
         const merged = mergeScriptFiles(
           current.data.files ?? [],
@@ -194,17 +204,27 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "list_script_versions",
-    "List an Apps Script project's saved versions. Returns versions with versionNumber, description, createTime.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
-      pageSize: z.number().int().min(1).max(200).optional().describe("Max per page."),
-      pageToken: z.string().optional().describe("Page token from a prior call."),
+      description:
+        "List an Apps Script project's saved versions. Returns versions with versionNumber, description, createTime.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Max per page."),
+        pageToken: z.string().optional().describe("Page token from a prior call."),
+      },
     },
     async ({ scriptId, pageSize, pageToken }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.projects.versions.list({
           scriptId,
           pageSize,
@@ -220,16 +240,23 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "create_script_version",
-    "Create an immutable version (snapshot) of an Apps Script project. Deployments reference a version. Returns {scriptId, versionNumber, description}.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
-      description: z.string().optional().describe("Description for this version."),
+      description:
+        "Create an immutable version (snapshot) of an Apps Script project. Deployments reference a version. Returns {scriptId, versionNumber, description}.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+        description: z
+          .string()
+          .optional()
+          .describe("Description for this version."),
+      },
     },
     async ({ scriptId, description }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.projects.versions.create({
           scriptId,
           requestBody: { description },
@@ -245,17 +272,27 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "list_script_deployments",
-    "List an Apps Script project's deployments. Returns deployments with deploymentId, config, entry points.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
-      pageSize: z.number().int().min(1).max(200).optional().describe("Max per page."),
-      pageToken: z.string().optional().describe("Page token from a prior call."),
+      description:
+        "List an Apps Script project's deployments. Returns deployments with deploymentId, config, entry points.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Max per page."),
+        pageToken: z.string().optional().describe("Page token from a prior call."),
+      },
     },
     async ({ scriptId, pageSize, pageToken }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.projects.deployments.list({
           scriptId,
           pageSize,
@@ -271,24 +308,33 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "create_script_deployment",
-    "Deploy a version of an Apps Script project. Requires an existing versionNumber (create one with create_script_version). Returns {scriptId, deploymentId, versionNumber}.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
-      versionNumber: z
-        .number()
-        .int()
-        .describe("The version number to deploy (from create_script_version)."),
-      description: z.string().optional().describe("Description for the deployment."),
-      manifestFileName: z
-        .string()
-        .default("appsscript")
-        .describe("Manifest file name (default 'appsscript')."),
+      description:
+        "Deploy a version of an Apps Script project. Requires an existing versionNumber (create one with create_script_version). Returns {scriptId, deploymentId, versionNumber}.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+        versionNumber: z
+          .number()
+          .int()
+          .describe(
+            "The version number to deploy (from create_script_version)."
+          ),
+        description: z
+          .string()
+          .optional()
+          .describe("Description for the deployment."),
+        manifestFileName: z
+          .string()
+          .default("appsscript")
+          .describe("Manifest file name (default 'appsscript')."),
+      },
     },
     async ({ scriptId, versionNumber, description, manifestFileName }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.projects.deployments.create({
           scriptId,
           requestBody: { versionNumber, description, manifestFileName },
@@ -305,33 +351,39 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "run_script_function",
-    `Execute a function in an Apps Script project via the Apps Script API. ${RUN_HINT} Returns the function's result, or a clear error with the script stack trace on failure.`,
     {
-      scriptId: z
-        .string()
-        .describe("The script ID (or API Executable deployment ID) to run."),
-      function: z.string().describe("The function name to execute (no parentheses)."),
-      parameters: z
-        .array(z.unknown())
-        .optional()
-        .describe("Primitive parameters passed to the function."),
-      devMode: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Run the latest saved code (owner only) instead of the deployed version. Default false."
-        ),
+      description: `Execute a function in an Apps Script project via the Apps Script API. ${RUN_HINT} Returns the function's result, or a clear error with the script stack trace on failure.`,
+      inputSchema: {
+        scriptId: z
+          .string()
+          .describe(
+            "The script ID (or API Executable deployment ID) to run."
+          ),
+        function: z
+          .string()
+          .describe("The function name to execute (no parentheses)."),
+        parameters: z
+          .array(z.unknown())
+          .optional()
+          .describe("Primitive parameters passed to the function."),
+        devMode: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run the latest saved code (owner only) instead of the deployed version. Default false."
+          ),
+      },
     },
     async ({ scriptId, function: fn, parameters, devMode }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.scripts.run({
           scriptId,
           requestBody: { function: fn, parameters, devMode },
         });
-        // A run can succeed at HTTP level but the script may have thrown.
         if (res.data.error) {
           const status = res.data.error;
           const detail = (status.details?.[0] ?? {}) as {
@@ -346,7 +398,7 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
             isError: true,
             content: [
               {
-                type: "text",
+                type: "text" as const,
                 text:
                   `run_script_function: script error` +
                   `${detail.errorType ? ` (${detail.errorType})` : ""}: ` +
@@ -360,34 +412,34 @@ export function registerScriptTools(server: McpServer, getClients: GetClients) {
             ],
           };
         }
-        return jsonResult({
-          scriptId,
-          result: res.data.response?.result,
-        });
+        return jsonResult({ scriptId, result: res.data.response?.result });
       } catch (err) {
-        // 403/404 usually means the GCP-project / API-Executable constraint.
         return handleGoogleError(err, `run_script_function. ${RUN_HINT}`);
       }
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "get_script_processes",
-    "List recent executions (processes) for an Apps Script project, with function name, type, status and timing. Optional pageSize.",
     {
-      scriptId: z.string().describe("The script project's Drive ID."),
-      pageSize: z
-        .number()
-        .int()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe("Max processes to return."),
-      pageToken: z.string().optional().describe("Page token from a prior call."),
+      description:
+        "List recent executions (processes) for an Apps Script project, with function name, type, status and timing. Optional pageSize.",
+      inputSchema: {
+        scriptId: z.string().describe("The script project's Drive ID."),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Max processes to return."),
+        pageToken: z.string().optional().describe("Page token from a prior call."),
+      },
     },
     async ({ scriptId, pageSize, pageToken }) => {
       try {
-        const { script } = await getClients();
+        const { script } = await ctx.getClients();
         const res = await script.processes.listScriptProcesses({
           scriptId,
           pageSize,

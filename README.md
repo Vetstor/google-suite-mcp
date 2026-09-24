@@ -242,6 +242,32 @@ returns your files.
 
 ---
 
+## Access tiers
+
+The remote server exposes three MCP endpoints with different permission levels:
+
+| Endpoint    | Tiers allowed          | Suggested audience                      |
+|-------------|------------------------|-----------------------------------------|
+| `/mcp`      | read + write + destructive | Trusted users, power users, admins  |
+| `/mcp/write`| read + write           | Standard org members (default rollout)  |
+| `/mcp/read` | read only              | Guests, reviewers, audit workflows      |
+
+Each endpoint has its own OAuth protected-resource metadata at
+`/.well-known/oauth-protected-resource/mcp/<endpoint>`, so clients can discover
+which scopes are required automatically.
+
+**Suggested rollout:** point most users at `/mcp/write` — they can read, create,
+and edit documents but cannot delete sheets/slides/items or run raw batch-update
+requests. Reserve `/mcp` for power users who need the full surface.
+
+**Tool annotations:** every tool carries MCP `ToolAnnotations` derived from its
+tier (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`),
+so MCP-aware clients can display intent and warn before destructive operations.
+
+**Stdio (`TOOL_TIERS`):** the stdio entry point reads the `TOOL_TIERS` environment
+variable (comma-separated, default `read,write,destructive`) and passes it to the
+tool registration layer, so the same tier-filtering logic applies in headless mode.
+
 ## For admins
 
 - **What users can do:** exactly what their own Google account can — read/write the Sheets, Docs,

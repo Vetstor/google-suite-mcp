@@ -1,18 +1,17 @@
 import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { forms_v1 } from "googleapis";
 import {
   parseDriveId,
   handleGoogleError,
   jsonResult,
-  type GetClients,
+  defineTool,
+  type RegisterCtx,
 } from "../helpers.js";
 
 // ---------------------------------------------------------------------------
 // Item summarization (exported for unit testing)
 // ---------------------------------------------------------------------------
 
-/** Map a Forms API ChoiceQuestion.type to the compact suffix we surface. */
 function choiceKind(type: string | null | undefined): string {
   switch (type) {
     case "RADIO":
@@ -26,11 +25,6 @@ function choiceKind(type: string | null | undefined): string {
   }
 }
 
-/**
- * Derive the compact question-kind label for a form item:
- * TEXT / PARAGRAPH / CHOICE(radio|checkbox|dropdown) / SCALE / DATE / TIME /
- * FILE_UPLOAD / GRID / PAGE_BREAK / TEXT_ITEM / IMAGE / VIDEO.
- */
 export function itemType(item: forms_v1.Schema$Item): string {
   if (item.questionItem?.question) {
     const q = item.questionItem.question;
@@ -59,7 +53,6 @@ interface ItemSummary {
   options?: string[];
 }
 
-/** Build the compact per-item summary returned by get_form. */
 export function summarizeItems(
   items: forms_v1.Schema$Item[] | undefined
 ): ItemSummary[] {
@@ -80,10 +73,6 @@ export function summarizeItems(
   });
 }
 
-/**
- * Map questionId -> item title across a form's items so responses can be keyed
- * by the human-readable question title. Exported for unit testing.
- */
 export function questionTitleMap(
   items: forms_v1.Schema$Item[] | undefined
 ): Record<string, string> {
@@ -91,7 +80,6 @@ export function questionTitleMap(
   for (const item of items ?? []) {
     const qid = item.questionItem?.question?.questionId;
     if (qid) map[qid] = item.title ?? qid;
-    // Question groups: each row question has its own id.
     for (const q of item.questionGroupItem?.questions ?? []) {
       if (q.questionId) map[q.questionId] = item.title ?? q.questionId;
     }
@@ -106,11 +94,6 @@ interface FlatResponse {
   answers: Record<string, string | string[]>;
 }
 
-/**
- * Flatten Forms API FormResponse objects into rows keyed by question title.
- * Single-value answers become a string; multi-value (CHECKBOX) become an array.
- * Exported for unit testing.
- */
 export function flattenResponses(
   responses: forms_v1.Schema$FormResponse[] | undefined,
   titleById: Record<string, string>
@@ -167,10 +150,6 @@ export interface AddQuestionOpts {
   scale?: z.infer<typeof ScaleSpec>;
 }
 
-/**
- * Build a Forms API createItem Request for a high-level add_question call.
- * Throws if required inputs for the chosen type are missing.
- */
 export function buildAddQuestionRequest(
   opts: AddQuestionOpts
 ): forms_v1.Schema$Request {
@@ -236,30 +215,34 @@ export function buildAddQuestionRequest(
 // Tool registration
 // ---------------------------------------------------------------------------
 
-export function registerFormsTools(server: McpServer, getClients: GetClients) {
-  server.tool(
+export function registerFormsTools(ctx: RegisterCtx) {
+  defineTool(
+    ctx,
     "list_forms",
-    "List Google Forms accessible to the caller. Optionally filter by name (substring) or Drive folder.",
     {
-      query: z
-        .string()
-        .optional()
-        .describe("Name substring to search for (case-insensitive)."),
-      folderId: z
-        .string()
-        .optional()
-        .describe("Restrict to a specific Drive folder ID."),
-      pageSize: z
-        .number()
-        .int()
-        .min(1)
-        .max(1000)
-        .default(50)
-        .describe("Max results to return (default 50)."),
+      description:
+        "List Google Forms accessible to the caller. Optionally filter by name (substring) or Drive folder.",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Name substring to search for (case-insensitive)."),
+        folderId: z
+          .string()
+          .optional()
+          .describe("Restrict to a specific Drive folder ID."),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .default(50)
+          .describe("Max results to return (default 50)."),
+      },
     },
     async ({ query, folderId, pageSize }) => {
       try {
-        const { drive } = await getClients();
+        const { drive } = await ctx.getClients();
         let q = "mimeType='application/vnd.google-apps.form' and trashed=false";
         if (query) q += ` and name contains '${query.replace(/'/g, "\\'")}'`;
         if (folderId) q += ` and '${folderId}' in parents`;
@@ -276,20 +259,24 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "get_form",
-    "Get a Google Form's structure: {formId, title, description, responderUri, linkedSheetId?, items:[{itemId, index, title, type, required, options?}]}. The type is the question kind: TEXT/PARAGRAPH/CHOICE(radio|checkbox|dropdown)/SCALE/DATE/TIME/FILE_UPLOAD/GRID/PAGE_BREAK/TEXT_ITEM/IMAGE/VIDEO. Set includeRaw=true to also return the raw Forms API JSON (large).",
     {
-      formId: z.string().describe("Form ID or full Google Forms URL."),
-      includeRaw: z
-        .boolean()
-        .default(false)
-        .describe("Also return the raw form JSON (large). Default false."),
+      description:
+        "Get a Google Form's structure: {formId, title, description, responderUri, linkedSheetId?, items:[{itemId, index, title, type, required, options?}]}. The type is the question kind: TEXT/PARAGRAPH/CHOICE(radio|checkbox|dropdown)/SCALE/DATE/TIME/FILE_UPLOAD/GRID/PAGE_BREAK/TEXT_ITEM/IMAGE/VIDEO. Set includeRaw=true to also return the raw Forms API JSON (large).",
+      inputSchema: {
+        formId: z.string().describe("Form ID or full Google Forms URL."),
+        includeRaw: z
+          .boolean()
+          .default(false)
+          .describe("Also return the raw form JSON (large). Default false."),
+      },
     },
     async ({ formId, includeRaw }) => {
       try {
         const id = parseDriveId(formId);
-        const { forms } = await getClients();
+        const { forms } = await ctx.getClients();
         const res = await forms.forms.get({ formId: id });
         const form = res.data;
         const out: Record<string, unknown> = {
@@ -308,27 +295,31 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "create_form",
-    "Create a new Google Form. The Forms API create call only accepts a title (and documentTitle); a description is applied via a follow-up batchUpdate. Optionally move it to a Drive folder. Returns {formId, responderUri, editUrl}.",
     {
-      title: z.string().describe("Form title, visible to responders."),
-      documentTitle: z
-        .string()
-        .optional()
-        .describe("Drive file name (defaults to title if omitted)."),
-      description: z
-        .string()
-        .optional()
-        .describe("Form description (applied via batchUpdate after create)."),
-      folderId: z
-        .string()
-        .optional()
-        .describe("Drive folder ID to move the new form into."),
+      description:
+        "Create a new Google Form. The Forms API create call only accepts a title (and documentTitle); a description is applied via a follow-up batchUpdate. Optionally move it to a Drive folder. Returns {formId, responderUri, editUrl}.",
+      inputSchema: {
+        title: z.string().describe("Form title, visible to responders."),
+        documentTitle: z
+          .string()
+          .optional()
+          .describe("Drive file name (defaults to title if omitted)."),
+        description: z
+          .string()
+          .optional()
+          .describe("Form description (applied via batchUpdate after create)."),
+        folderId: z
+          .string()
+          .optional()
+          .describe("Drive folder ID to move the new form into."),
+      },
     },
     async ({ title, documentTitle, description, folderId }) => {
       try {
-        const { forms, drive } = await getClients();
+        const { forms, drive } = await ctx.getClients();
         const created = await forms.forms.create({
           requestBody: {
             info: { title, documentTitle: documentTitle ?? title },
@@ -370,39 +361,43 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "add_question",
-    "Add a question to a Google Form. High-level wrapper over createItem. Choose a type; provide options[] for choice types (MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN) and scale{low,high,lowLabel?,highLabel?} for LINEAR_SCALE. By default the question is appended at the end. Returns {itemId, index}.",
     {
-      formId: z.string().describe("Form ID or full URL."),
-      title: z.string().describe("The question text."),
-      type: AddQuestionType.describe(
-        "Question type: SHORT_TEXT, PARAGRAPH, MULTIPLE_CHOICE, CHECKBOXES, DROPDOWN, LINEAR_SCALE, DATE, TIME."
-      ),
-      required: z
-        .boolean()
-        .default(false)
-        .describe("Whether an answer is required (default false)."),
-      options: z
-        .array(z.string())
-        .optional()
-        .describe("Choices for MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN."),
-      scale: ScaleSpec.optional().describe("Scale spec for LINEAR_SCALE."),
-      description: z
-        .string()
-        .optional()
-        .describe("Optional help text under the question."),
-      index: z
-        .number()
-        .int()
-        .min(0)
-        .optional()
-        .describe("0-based position to insert at (default: append at end)."),
+      description:
+        "Add a question to a Google Form. High-level wrapper over createItem. Choose a type; provide options[] for choice types (MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN) and scale{low,high,lowLabel?,highLabel?} for LINEAR_SCALE. By default the question is appended at the end. Returns {itemId, index}.",
+      inputSchema: {
+        formId: z.string().describe("Form ID or full URL."),
+        title: z.string().describe("The question text."),
+        type: AddQuestionType.describe(
+          "Question type: SHORT_TEXT, PARAGRAPH, MULTIPLE_CHOICE, CHECKBOXES, DROPDOWN, LINEAR_SCALE, DATE, TIME."
+        ),
+        required: z
+          .boolean()
+          .default(false)
+          .describe("Whether an answer is required (default false)."),
+        options: z
+          .array(z.string())
+          .optional()
+          .describe("Choices for MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN."),
+        scale: ScaleSpec.optional().describe("Scale spec for LINEAR_SCALE."),
+        description: z
+          .string()
+          .optional()
+          .describe("Optional help text under the question."),
+        index: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("0-based position to insert at (default: append at end)."),
+      },
     },
     async ({ formId, title, type, required, options, scale, description, index }) => {
       try {
         const id = parseDriveId(formId);
-        const { forms } = await getClients();
+        const { forms } = await ctx.getClients();
 
         let insertIndex = index;
         if (insertIndex === undefined) {
@@ -424,8 +419,7 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
           formId: id,
           requestBody: { requests: [request] },
         });
-        const itemId =
-          res.data.replies?.[0]?.createItem?.itemId ?? undefined;
+        const itemId = res.data.replies?.[0]?.createItem?.itemId ?? undefined;
         return jsonResult({ itemId, index: insertIndex });
       } catch (err) {
         return handleGoogleError(err, "add_question");
@@ -433,18 +427,22 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "update_form_info",
-    "Update a Google Form's title and/or description. Returns {formId, updated}.",
     {
-      formId: z.string().describe("Form ID or full URL."),
-      title: z.string().optional().describe("New form title."),
-      description: z.string().optional().describe("New form description."),
+      description:
+        "Update a Google Form's title and/or description. Returns {formId, updated}.",
+      inputSchema: {
+        formId: z.string().describe("Form ID or full URL."),
+        title: z.string().optional().describe("New form title."),
+        description: z.string().optional().describe("New form description."),
+      },
     },
     async ({ formId, title, description }) => {
       try {
         const id = parseDriveId(formId);
-        const { forms } = await getClients();
+        const { forms } = await ctx.getClients();
         const info: forms_v1.Schema$Info = {};
         const masks: string[] = [];
         if (title !== undefined) {
@@ -473,17 +471,21 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "delete_item",
-    "Delete an item (question, section, media) from a Google Form by its itemId. The item's current index is resolved via forms.get. Returns {formId, deletedItemId, index}.",
     {
-      formId: z.string().describe("Form ID or full URL."),
-      itemId: z.string().describe("The itemId to delete (from get_form)."),
+      description:
+        "Delete an item (question, section, media) from a Google Form by its itemId. The item's current index is resolved via forms.get. Returns {formId, deletedItemId, index}.",
+      inputSchema: {
+        formId: z.string().describe("Form ID or full URL."),
+        itemId: z.string().describe("The itemId to delete (from get_form)."),
+      },
     },
     async ({ formId, itemId }) => {
       try {
         const id = parseDriveId(formId);
-        const { forms } = await getClients();
+        const { forms } = await ctx.getClients();
         const cur = await forms.forms.get({ formId: id });
         const index = (cur.data.items ?? []).findIndex(
           (it) => it.itemId === itemId
@@ -504,31 +506,34 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "list_responses",
-    "List responses to a Google Form, flattened to {responseId, createTime, respondentEmail?, answers:{[questionTitle]: value|value[]}}. Answers are keyed by question title (CHECKBOX answers become an array). Optional filter, e.g. 'timestamp > 2026-01-01T00:00:00Z'.",
     {
-      formId: z.string().describe("Form ID or full URL."),
-      filter: z
-        .string()
-        .optional()
-        .describe(
-          "Forms API responses filter, e.g. \"timestamp > 2026-01-01T00:00:00Z\"."
-        ),
-      pageSize: z
-        .number()
-        .int()
-        .min(1)
-        .max(5000)
-        .optional()
-        .describe("Max responses per page."),
-      pageToken: z.string().optional().describe("Page token from a prior call."),
+      description:
+        "List responses to a Google Form, flattened to {responseId, createTime, respondentEmail?, answers:{[questionTitle]: value|value[]}}. Answers are keyed by question title (CHECKBOX answers become an array). Optional filter, e.g. 'timestamp > 2026-01-01T00:00:00Z'.",
+      inputSchema: {
+        formId: z.string().describe("Form ID or full URL."),
+        filter: z
+          .string()
+          .optional()
+          .describe(
+            'Forms API responses filter, e.g. "timestamp > 2026-01-01T00:00:00Z".'
+          ),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(5000)
+          .optional()
+          .describe("Max responses per page."),
+        pageToken: z.string().optional().describe("Page token from a prior call."),
+      },
     },
     async ({ formId, filter, pageSize, pageToken }) => {
       try {
         const id = parseDriveId(formId);
-        const { forms } = await getClients();
-        // forms.get gives us the questionId -> title map for flattening.
+        const { forms } = await ctx.getClients();
         const [form, resp] = await Promise.all([
           forms.forms.get({ formId: id }),
           forms.forms.responses.list({
@@ -550,21 +555,25 @@ export function registerFormsTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "batch_update_forms_raw",
-    "Advanced escape hatch: send raw Forms API Request objects to forms.batchUpdate. Use for anything not covered by other tools (moveItem, updateItem, media, sections, etc.). See https://developers.google.com/forms/api/reference/rest/v1/forms/batchUpdate",
     {
-      formId: z.string().describe("Form ID or full URL."),
-      requests: z
-        .array(z.record(z.string(), z.unknown()))
-        .describe(
-          "Array of Forms API Request objects, e.g. [{createItem:{...}}, {updateItem:{...}}]."
-        ),
+      description:
+        "Advanced escape hatch: send raw Forms API Request objects to forms.batchUpdate. Use for anything not covered by other tools (moveItem, updateItem, media, sections, etc.). See https://developers.google.com/forms/api/reference/rest/v1/forms/batchUpdate",
+      inputSchema: {
+        formId: z.string().describe("Form ID or full URL."),
+        requests: z
+          .array(z.record(z.string(), z.unknown()))
+          .describe(
+            "Array of Forms API Request objects, e.g. [{createItem:{...}}, {updateItem:{...}}]."
+          ),
+      },
     },
     async ({ formId, requests }) => {
       try {
         const id = parseDriveId(formId);
-        const { forms } = await getClients();
+        const { forms } = await ctx.getClients();
         const res = await forms.forms.batchUpdate({
           formId: id,
           requestBody: { requests: requests as forms_v1.Schema$Request[] },

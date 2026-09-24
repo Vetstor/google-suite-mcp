@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { GetClients } from "../helpers.js";
+import type { GetClients, RegisterCtx } from "../helpers.js";
+import type { Tier } from "./tiers.js";
 import { registerDriveTools } from "./drive.js";
 import { registerMetadataTools } from "./metadata.js";
 import { registerValueTools } from "./values.js";
@@ -9,24 +10,35 @@ import { registerSlidesTools } from "./slides.js";
 import { registerFormsTools } from "./forms.js";
 import { registerScriptTools } from "./script.js";
 
+export type { Tier };
+
 /**
- * Register all Google Workspace tools (Sheets + Docs + Slides) on an McpServer,
- * bound to the given client resolver. Both the stdio (service-account) and
- * remote (per-user OAuth) entrypoints call this so the tool surface stays
- * identical.
+ * Register Google Workspace tools on an McpServer.
+ *
+ * @param opts.tiers - Only register tools in these tiers (default: all three).
+ *   Useful to expose read-only or read+write subsets.
  */
-export function registerAllTools(server: McpServer, getClients: GetClients) {
+export function registerAllTools(
+  server: McpServer,
+  getClients: GetClients,
+  opts?: { tiers?: Tier[] }
+): void {
+  const allowed = new Set<Tier>(
+    opts?.tiers ?? (["read", "write", "destructive"] as Tier[])
+  );
+  const ctx: RegisterCtx = { server, getClients, tiers: allowed };
+
   // Sheets
-  registerDriveTools(server, getClients);
-  registerMetadataTools(server, getClients);
-  registerValueTools(server, getClients);
-  registerAdvancedTools(server, getClients);
+  registerDriveTools(ctx);
+  registerMetadataTools(ctx);
+  registerValueTools(ctx);
+  registerAdvancedTools(ctx);
   // Docs
-  registerDocsTools(server, getClients);
+  registerDocsTools(ctx);
   // Slides
-  registerSlidesTools(server, getClients);
+  registerSlidesTools(ctx);
   // Forms
-  registerFormsTools(server, getClients);
+  registerFormsTools(ctx);
   // Apps Script
-  registerScriptTools(server, getClients);
+  registerScriptTools(ctx);
 }

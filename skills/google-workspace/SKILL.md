@@ -118,3 +118,5 @@ description: Use when working with Google Sheets, Docs, Slides, Forms or Apps Sc
   `batch_update_slides_raw`. See the slides reference.
 - **Insert order in Docs:** forgetting to go back-to-front corrupts every later index — one wrong
   insert cascades. When unsure, re-`get_document` between batches.
+
+- **Tool tiers:** the server exposes `/mcp` (all tools), `/mcp/write` (read+write, no destructive), and `/mcp/read` (read-only); each tool carries MCP `ToolAnnotations` (readOnlyHint, destructiveHint) so clients can surface intent before execution.

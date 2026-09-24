@@ -14,7 +14,7 @@ import { SheetsOAuthProvider } from "./provider.js";
 import { exchangeGoogleCode, getUserClients } from "./google.js";
 import { encrypt, randomToken, sha256 } from "./crypto.js";
 import { logger as defaultLogger, type Logger } from "./logger.js";
-import { registerAllTools } from "../tools/index.js";
+import { registerAllTools, type Tier } from "../tools/index.js";
 
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
 
@@ -168,54 +168,106 @@ export function createApp(deps: AppDeps): express.Express {
   });
 
   // -------------------------------------------------------------------------
-  // MCP endpoint — stateless, one server+transport per request, bound to user
+  // MCP endpoints — stateless, one server+transport per request, bound to user
+  //
+  // Three tier-filtered endpoints share the same OAuth provider:
+  //   /mcp        → all tiers (read + write + destructive)
+  //   /mcp/write  → read + write only
+  //   /mcp/read   → read only
   // -------------------------------------------------------------------------
-  const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(
-    new URL(config.mcpResourceUrl)
-  );
-  const bearer = requireBearerAuth({
-    verifier: provider,
-    requiredScopes: [],
-    resourceMetadataUrl,
-  });
 
-  const mcpHandler = async (req: Request, res: Response) => {
-    const sub = req.auth?.extra?.sub as string | undefined;
-    if (!sub) {
-      res.status(401).json({ error: "invalid_token" });
-      return;
-    }
-
-    const server = new McpServer({ name: "google-workspace-mcp", version: "1.0.0" });
-    registerAllTools(server, () => getUserClients(config, store, sub));
-
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless
-    });
-
-    res.on("close", () => {
-      void transport.close();
-      void server.close();
-    });
-
-    try {
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-    } catch (err) {
-      logger.error({ event: "mcp_request_failed", err: (err as Error).message });
-      if (!res.headersSent) {
-        res.status(500).json({
-          jsonrpc: "2.0",
-          error: { code: -32603, message: "Internal server error" },
-          id: null,
-        });
+  /** Build a request handler that serves a MCP server with the given tiers. */
+  const makeMcpHandler = (tiers: Tier[]) => {
+    const tierSet = new Set<Tier>(tiers);
+    return async (req: Request, res: Response): Promise<void> => {
+      const sub = req.auth?.extra?.sub as string | undefined;
+      if (!sub) {
+        res.status(401).json({ error: "invalid_token" });
+        return;
       }
-    }
+
+      const server = new McpServer({ name: "google-workspace-mcp", version: "1.0.0" });
+      registerAllTools(server, () => getUserClients(config, store, sub), {
+        tiers: Array.from(tierSet),
+      });
+
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // stateless
+      });
+
+      res.on("close", () => {
+        void transport.close();
+        void server.close();
+      });
+
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (err) {
+        logger.error({ event: "mcp_request_failed", err: (err as Error).message });
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: "Internal server error" },
+            id: null,
+          });
+        }
+      }
+    };
   };
 
-  app.post("/mcp", bearer, mcpHandler);
-  app.get("/mcp", bearer, mcpHandler);
-  app.delete("/mcp", bearer, mcpHandler);
+  /** Make a requireBearerAuth middleware pointing at the correct metadata URL. */
+  const makeBearer = (endpointUrl: string) =>
+    requireBearerAuth({
+      verifier: provider,
+      requiredScopes: [],
+      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(
+        new URL(endpointUrl)
+      ),
+    });
+
+  // /mcp — all tiers
+  const bearerAll = makeBearer(config.mcpResourceUrl);
+  const handlerAll = makeMcpHandler(["read", "write", "destructive"]);
+  app.post("/mcp", bearerAll, handlerAll);
+  app.get("/mcp", bearerAll, handlerAll);
+  app.delete("/mcp", bearerAll, handlerAll);
+
+  // /mcp/write — read + write (no destructive)
+  const mcpWriteUrl = config.baseUrl + "/mcp/write";
+  const bearerWrite = makeBearer(mcpWriteUrl);
+  const handlerWrite = makeMcpHandler(["read", "write"]);
+  app.post("/mcp/write", bearerWrite, handlerWrite);
+  app.get("/mcp/write", bearerWrite, handlerWrite);
+  app.delete("/mcp/write", bearerWrite, handlerWrite);
+
+  // Well-known metadata for /mcp/write
+  app.get("/.well-known/oauth-protected-resource/mcp/write", (_req, res) => {
+    res.json({
+      resource: mcpWriteUrl,
+      authorization_servers: [config.baseUrl],
+      scopes_supported: MCP_SCOPES,
+      resource_name: "Google Workspace MCP (read+write)",
+    });
+  });
+
+  // /mcp/read — read only
+  const mcpReadUrl = config.baseUrl + "/mcp/read";
+  const bearerRead = makeBearer(mcpReadUrl);
+  const handlerRead = makeMcpHandler(["read"]);
+  app.post("/mcp/read", bearerRead, handlerRead);
+  app.get("/mcp/read", bearerRead, handlerRead);
+  app.delete("/mcp/read", bearerRead, handlerRead);
+
+  // Well-known metadata for /mcp/read
+  app.get("/.well-known/oauth-protected-resource/mcp/read", (_req, res) => {
+    res.json({
+      resource: mcpReadUrl,
+      authorization_servers: [config.baseUrl],
+      scopes_supported: MCP_SCOPES,
+      resource_name: "Google Workspace MCP (read-only)",
+    });
+  });
 
   // -------------------------------------------------------------------------
   // Misc
@@ -230,8 +282,11 @@ export function createApp(deps: AppDeps): express.Express {
       .status(200)
       .type("text/plain")
       .send(
-        "Google Workspace MCP server (remote, OAuth 2.1) — Sheets, Docs & Slides.\n" +
-          `MCP endpoint: ${config.mcpResourceUrl}\n` +
+        "Google Workspace MCP server (remote, OAuth 2.1) — Sheets, Docs, Slides, Forms & Apps Script.\n\n" +
+          "Endpoints:\n" +
+          `  /mcp        — all tools (read + write + destructive)\n` +
+          `  /mcp/write  — read + write (no destructive)\n` +
+          `  /mcp/read   — read-only\n\n` +
           "Add as a custom connector in claude.ai. See README for setup.\n"
       );
   });

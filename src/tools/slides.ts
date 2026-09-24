@@ -1,21 +1,19 @@
 import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { slides_v1 } from "googleapis";
 import {
   parseDriveId,
   handleGoogleError,
   jsonResult,
-  type GetClients,
+  defineTool,
+  type RegisterCtx,
 } from "../helpers.js";
 
 const EMU_PER_INCH = 914400;
 
-/** Generate a Slides-safe object id (starts alphanumeric, 5-50 chars). */
 function genId(prefix: string): string {
   return `${prefix}${Math.random().toString(36).slice(2, 12)}`;
 }
 
-/** Concatenate the plain text of a shape's textElements. */
 function shapeText(shape: slides_v1.Schema$Shape | undefined): string {
   let text = "";
   for (const te of shape?.text?.textElements ?? []) {
@@ -36,14 +34,11 @@ function elementType(el: slides_v1.Schema$PageElement): string {
   return "unknown";
 }
 
-/** Extract the speaker-notes text of a slide, if any. */
 function notesText(slide: slides_v1.Schema$Page): string | undefined {
   const notesPage = slide.slideProperties?.notesPage;
   const speakerId = notesPage?.notesProperties?.speakerNotesObjectId;
   if (!notesPage || !speakerId) return undefined;
-  const el = (notesPage.pageElements ?? []).find(
-    (e) => e.objectId === speakerId
-  );
+  const el = (notesPage.pageElements ?? []).find((e) => e.objectId === speakerId);
   const text = shapeText(el?.shape).trim();
   return text.length ? text : undefined;
 }
@@ -61,7 +56,6 @@ interface SlideSummary {
   }>;
 }
 
-/** Build the compact per-slide summary returned by get_presentation. */
 export function summarizeSlides(
   slides: slides_v1.Schema$Page[] | undefined
 ): SlideSummary[] {
@@ -87,11 +81,6 @@ export interface PlaceholderInserts {
   filled: { title?: string; body?: string };
 }
 
-/**
- * Given a freshly created slide page and optional title/body text, produce the
- * insertText requests that fill the slide's TITLE/CENTERED_TITLE and
- * BODY/SUBTITLE placeholders. Exported for unit testing.
- */
 export function buildPlaceholderInserts(
   page: slides_v1.Schema$Page,
   opts: { title?: string; body?: string }
@@ -186,30 +175,34 @@ const positionShape = {
     .describe("Y offset from top-left in EMU. Default 1 in."),
 };
 
-export function registerSlidesTools(server: McpServer, getClients: GetClients) {
-  server.tool(
+export function registerSlidesTools(ctx: RegisterCtx) {
+  defineTool(
+    ctx,
     "list_presentations",
-    "List Google Slides presentations accessible to the caller. Optionally filter by name (substring) or Drive folder.",
     {
-      query: z
-        .string()
-        .optional()
-        .describe("Name substring to search for (case-insensitive)."),
-      folderId: z
-        .string()
-        .optional()
-        .describe("Restrict to a specific Drive folder ID."),
-      pageSize: z
-        .number()
-        .int()
-        .min(1)
-        .max(1000)
-        .default(50)
-        .describe("Max results to return (default 50)."),
+      description:
+        "List Google Slides presentations accessible to the caller. Optionally filter by name (substring) or Drive folder.",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Name substring to search for (case-insensitive)."),
+        folderId: z
+          .string()
+          .optional()
+          .describe("Restrict to a specific Drive folder ID."),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .default(50)
+          .describe("Max results to return (default 50)."),
+      },
     },
     async ({ query, folderId, pageSize }) => {
       try {
-        const { drive } = await getClients();
+        const { drive } = await ctx.getClients();
         let q =
           "mimeType='application/vnd.google-apps.presentation' and trashed=false";
         if (query) q += ` and name contains '${query.replace(/'/g, "\\'")}'`;
@@ -227,22 +220,26 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "get_presentation",
-    "Get a presentation's structure: {presentationId, title, slides:[{objectId, index, layout, notes?, elements:[{objectId, type, text, placeholderType?}]}]}. Set includeRaw=true to also return the raw Slides API JSON (large).",
     {
-      presentationId: z
-        .string()
-        .describe("Presentation ID or full Google Slides URL."),
-      includeRaw: z
-        .boolean()
-        .default(false)
-        .describe("Also return the raw presentation JSON (large). Default false."),
+      description:
+        "Get a presentation's structure: {presentationId, title, slides:[{objectId, index, layout, notes?, elements:[{objectId, type, text, placeholderType?}]}]}. Set includeRaw=true to also return the raw Slides API JSON (large).",
+      inputSchema: {
+        presentationId: z
+          .string()
+          .describe("Presentation ID or full Google Slides URL."),
+        includeRaw: z
+          .boolean()
+          .default(false)
+          .describe("Also return the raw presentation JSON (large). Default false."),
+      },
     },
     async ({ presentationId, includeRaw }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const res = await slides.presentations.get({ presentationId: id });
         const out: Record<string, unknown> = {
           presentationId: res.data.presentationId,
@@ -257,19 +254,23 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "create_presentation",
-    "Create a new Google Slides presentation. Optionally place it in a Drive folder. Returns {presentationId, url, title}.",
     {
-      title: z.string().describe("Title of the new presentation."),
-      folderId: z
-        .string()
-        .optional()
-        .describe("Drive folder ID to place the file in."),
+      description:
+        "Create a new Google Slides presentation. Optionally place it in a Drive folder. Returns {presentationId, url, title}.",
+      inputSchema: {
+        title: z.string().describe("Title of the new presentation."),
+        folderId: z
+          .string()
+          .optional()
+          .describe("Drive folder ID to place the file in."),
+      },
     },
     async ({ title, folderId }) => {
       try {
-        const { slides, drive } = await getClients();
+        const { slides, drive } = await ctx.getClients();
         const created = await slides.presentations.create({
           requestBody: { title },
         });
@@ -293,31 +294,39 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "add_slide",
-    "Add a slide with a predefined layout. Optionally fill its title and body placeholders. Returns the new slide objectId plus the placeholder ids that were filled.",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      layout: PredefinedLayout,
-      insertionIndex: z
-        .number()
-        .int()
-        .min(0)
-        .optional()
-        .describe("0-based index to insert at (default: append at end)."),
-      title: z
-        .string()
-        .optional()
-        .describe("Text for the slide's title placeholder, if the layout has one."),
-      body: z
-        .string()
-        .optional()
-        .describe("Text for the slide's body placeholder, if the layout has one."),
+      description:
+        "Add a slide with a predefined layout. Optionally fill its title and body placeholders. Returns the new slide objectId plus the placeholder ids that were filled.",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        layout: PredefinedLayout,
+        insertionIndex: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("0-based index to insert at (default: append at end)."),
+        title: z
+          .string()
+          .optional()
+          .describe(
+            "Text for the slide's title placeholder, if the layout has one."
+          ),
+        body: z
+          .string()
+          .optional()
+          .describe(
+            "Text for the slide's body placeholder, if the layout has one."
+          ),
+      },
     },
     async ({ presentationId, layout, insertionIndex, title, body }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const slideId = genId("slide_");
 
         const createReq: slides_v1.Schema$Request = {
@@ -356,26 +365,30 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "replace_text_in_presentation",
-    "Replace all occurrences of a string across a presentation (or specific slides). Returns occurrencesChanged.",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      find: z.string().describe("Exact text to find."),
-      replace: z.string().describe("Replacement text."),
-      matchCase: z
-        .boolean()
-        .default(true)
-        .describe("Case-sensitive match (default true)."),
-      pageObjectIds: z
-        .array(z.string())
-        .optional()
-        .describe("Restrict replacement to these slide object ids."),
+      description:
+        "Replace all occurrences of a string across a presentation (or specific slides). Returns occurrencesChanged.",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        find: z.string().describe("Exact text to find."),
+        replace: z.string().describe("Replacement text."),
+        matchCase: z
+          .boolean()
+          .default(true)
+          .describe("Case-sensitive match (default true)."),
+        pageObjectIds: z
+          .array(z.string())
+          .optional()
+          .describe("Restrict replacement to these slide object ids."),
+      },
     },
     async ({ presentationId, find, replace, matchCase, pageObjectIds }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const res = await slides.presentations.batchUpdate({
           presentationId: id,
           requestBody: {
@@ -399,19 +412,23 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "insert_text_box",
-    "Add a text box to a slide with the given text. Position/size are in EMU (1 inch = 914400 EMU); defaults to a 4x1 inch box at 1 inch,1 inch. Returns the new shape objectId.",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      slideObjectId: z.string().describe("Object id of the slide to add to."),
-      text: z.string().describe("Text to place in the box."),
-      ...positionShape,
+      description:
+        "Add a text box to a slide with the given text. Position/size are in EMU (1 inch = 914400 EMU); defaults to a 4x1 inch box at 1 inch,1 inch. Returns the new shape objectId.",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        slideObjectId: z.string().describe("Object id of the slide to add to."),
+        text: z.string().describe("Text to place in the box."),
+        ...positionShape,
+      },
     },
     async ({ presentationId, slideObjectId, text, ...pos }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const shapeId = genId("tb_");
         await slides.presentations.batchUpdate({
           presentationId: id,
@@ -435,22 +452,26 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "insert_image",
-    "Insert an image onto a slide from a public image URL. Position/size are in EMU (1 inch = 914400 EMU); defaults to a 4x1 inch box at 1 inch,1 inch. The URL must be publicly accessible. Returns the new image objectId.",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      slideObjectId: z.string().describe("Object id of the slide to add to."),
-      imageUrl: z
-        .string()
-        .url()
-        .describe("Publicly accessible image URL (PNG/JPEG/GIF)."),
-      ...positionShape,
+      description:
+        "Insert an image onto a slide from a public image URL. Position/size are in EMU (1 inch = 914400 EMU); defaults to a 4x1 inch box at 1 inch,1 inch. The URL must be publicly accessible. Returns the new image objectId.",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        slideObjectId: z.string().describe("Object id of the slide to add to."),
+        imageUrl: z
+          .string()
+          .url()
+          .describe("Publicly accessible image URL (PNG/JPEG/GIF)."),
+        ...positionShape,
+      },
     },
     async ({ presentationId, slideObjectId, imageUrl, ...pos }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const imageId = genId("img_");
         await slides.presentations.batchUpdate({
           presentationId: id,
@@ -473,17 +494,22 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "delete_slide",
-    "Delete a slide (or any page object) by its object id.",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      objectId: z.string().describe("Object id of the slide/object to delete."),
+      description: "Delete a slide (or any page object) by its object id.",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        objectId: z
+          .string()
+          .describe("Object id of the slide/object to delete."),
+      },
     },
     async ({ presentationId, objectId }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         await slides.presentations.batchUpdate({
           presentationId: id,
           requestBody: { requests: [{ deleteObject: { objectId } }] },
@@ -495,17 +521,21 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "get_slide_thumbnail",
-    "Get a PNG thumbnail URL for a slide. The returned contentUrl is temporary (expires ~30 min).",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      slideObjectId: z.string().describe("Object id of the slide to render."),
+      description:
+        "Get a PNG thumbnail URL for a slide. The returned contentUrl is temporary (expires ~30 min).",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        slideObjectId: z.string().describe("Object id of the slide to render."),
+      },
     },
     async ({ presentationId, slideObjectId }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const res = await slides.presentations.pages.getThumbnail({
           presentationId: id,
           pageObjectId: slideObjectId,
@@ -521,21 +551,25 @@ export function registerSlidesTools(server: McpServer, getClients: GetClients) {
     }
   );
 
-  server.tool(
+  defineTool(
+    ctx,
     "batch_update_slides_raw",
-    "Advanced escape hatch: send raw Slides API Request objects to presentations.batchUpdate. Use for layout, styling, tables, shapes, and anything not covered by other tools. See https://developers.google.com/slides/api/reference/rest/v1/presentations/request",
     {
-      presentationId: z.string().describe("Presentation ID or full URL."),
-      requests: z
-        .array(z.record(z.string(), z.unknown()))
-        .describe(
-          "Array of Slides API Request objects, e.g. [{createSlide:{...}}, {insertText:{...}}]."
-        ),
+      description:
+        "Advanced escape hatch: send raw Slides API Request objects to presentations.batchUpdate. Use for layout, styling, tables, shapes, and anything not covered by other tools. See https://developers.google.com/slides/api/reference/rest/v1/presentations/request",
+      inputSchema: {
+        presentationId: z.string().describe("Presentation ID or full URL."),
+        requests: z
+          .array(z.record(z.string(), z.unknown()))
+          .describe(
+            "Array of Slides API Request objects, e.g. [{createSlide:{...}}, {insertText:{...}}]."
+          ),
+      },
     },
     async ({ presentationId, requests }) => {
       try {
         const id = parseDriveId(presentationId);
-        const { slides } = await getClients();
+        const { slides } = await ctx.getClients();
         const res = await slides.presentations.batchUpdate({
           presentationId: id,
           requestBody: { requests: requests as slides_v1.Schema$Request[] },

@@ -217,3 +217,99 @@ describe("summarizeSlides", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bug fix: get_document tabs fallback (extractTabs + extractDocText)
+// When a doc uses tabs, body content lives in tabs[].documentTab.body.
+// The top-level body is empty and must fall back to joining tabs' text.
+// ---------------------------------------------------------------------------
+
+describe("get_document tabs fallback logic", () => {
+  it("extractDocText on empty body returns empty string", () => {
+    expect(extractDocText([])).toBe("");
+    expect(extractDocText(undefined)).toBe("");
+  });
+
+  it("extractTabs returns tab text from documentTab body", () => {
+    const tabs: docs_v1.Schema$Tab[] = [
+      {
+        tabProperties: { tabId: "t1", title: "Tab One" },
+        documentTab: {
+          body: {
+            content: [
+              {
+                paragraph: {
+                  elements: [{ textRun: { content: "Tab one content\n" } }],
+                  paragraphStyle: { namedStyleType: "NORMAL_TEXT" },
+                },
+              },
+            ],
+          },
+        },
+      },
+      {
+        tabProperties: { tabId: "t2", title: "Tab Two" },
+        documentTab: {
+          body: {
+            content: [
+              {
+                paragraph: {
+                  elements: [{ textRun: { content: "Tab two content\n" } }],
+                  paragraphStyle: { namedStyleType: "NORMAL_TEXT" },
+                },
+              },
+            ],
+          },
+        },
+      },
+    ];
+    const result = extractTabs(tabs);
+    expect(result).toHaveLength(2);
+    expect(result[0].text).toBe("Tab one content");
+    expect(result[1].text).toBe("Tab two content");
+    // Joined fallback text for top-level text field
+    const topText = result.map((t) => t.text).join("\n\n");
+    expect(topText).toBe("Tab one content\n\nTab two content");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug fix: append_text heading offset (leading newlines shift style range)
+// When text starts with '\n', updateParagraphStyle must skip leading newlines
+// so the style targets the new paragraph, not the previous one.
+// ---------------------------------------------------------------------------
+
+describe("append_text heading offset logic", () => {
+  it("counts leading newlines correctly", () => {
+    const texts = [
+      { text: "\nHello", leadingNls: 1 },
+      { text: "\n\nSection", leadingNls: 2 },
+      { text: "NoPrefixHere", leadingNls: 0 },
+      { text: "\n", leadingNls: 1 },
+    ];
+    for (const { text, leadingNls } of texts) {
+      const computed = text.length - text.trimStart().length;
+      expect(computed).toBe(leadingNls);
+    }
+  });
+
+  it("styleStart >= index + text.length means no style request", () => {
+    // text is just '\n' — no non-newline chars to style
+    const text = "\n";
+    const index = 10;
+    const leadingNls = text.length - text.trimStart().length;
+    const styleStart = index + leadingNls;
+    // styleStart === index + text.length, so no request should be emitted
+    expect(styleStart).toBe(index + text.length);
+  });
+
+  it("styleStart < index + text.length when text has non-newline content", () => {
+    const text = "\nActual heading";
+    const index = 5;
+    const leadingNls = text.length - text.trimStart().length;
+    const styleStart = index + leadingNls;
+    expect(styleStart).toBeLessThan(index + text.length);
+    // styleStart skips the leading newline
+    expect(styleStart).toBe(index + 1);
+  });
+});

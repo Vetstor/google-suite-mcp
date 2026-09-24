@@ -15,7 +15,7 @@ import {
   getScriptClient,
 } from "./auth.js";
 import { setServiceAccountEmailHint, type GetClients } from "./helpers.js";
-import { registerAllTools } from "./tools/index.js";
+import { registerAllTools, type Tier } from "./tools/index.js";
 
 function validateAuth(): void {
   try {
@@ -54,7 +54,14 @@ const getClients: GetClients = async () => ({
   script: getScriptClient(),
 });
 
-registerAllTools(server, getClients);
+// TOOL_TIERS env: comma-separated tier list, e.g. "read,write" or "read".
+// Default: all tiers enabled.
+const tierEnv = process.env.TOOL_TIERS;
+const tiers: Tier[] | undefined = tierEnv
+  ? (tierEnv.split(",").map((t) => t.trim()).filter(Boolean) as Tier[])
+  : undefined;
+
+registerAllTools(server, getClients, tiers !== undefined ? { tiers } : undefined);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
