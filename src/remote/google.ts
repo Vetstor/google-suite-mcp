@@ -115,6 +115,8 @@ export async function getUserClients(
     drive: google.drive({ version: "v3", auth }),
     docs: google.docs({ version: "v1", auth }),
     slides: google.slides({ version: "v1", auth }),
+    forms: google.forms({ version: "v1", auth }),
+    script: google.script({ version: "v1", auth }),
   };
   cache.set(sub, { clients, expiresAt: Date.now() + CACHE_TTL_MS });
   return clients;

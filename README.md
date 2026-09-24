@@ -1,8 +1,8 @@
 # google-mcp (Google Workspace MCP)
 
-Google Workspace MCP server with 30 tools for reading, writing, searching and managing **Sheets, Docs and Slides**. Two deployment modes:
+Google Workspace MCP server with 48 tools for reading, writing, searching and managing **Sheets, Docs, Slides, Forms and Apps Script**. Two deployment modes:
 
-- **Remote / OAuth (multi-user)** — deploy to Cloud Run, add as a claude.ai custom connector. Each user logs in with their own Google account and the server acts on Sheets/Docs/Slides/Drive **as that user**, with that user's own permissions. Built for org rollout to many users.
+- **Remote / OAuth (multi-user)** — deploy to Cloud Run, add as a claude.ai custom connector. Each user logs in with their own Google account and the server acts on Sheets/Docs/Slides/Forms/Apps Script/Drive **as that user**, with that user's own permissions. Built for org rollout to many users.
 - **Stdio / service account (headless)** — a single service-account identity over stdio, for Claude Desktop / Claude Code / cron jobs.
 
 ---
@@ -22,9 +22,9 @@ State lives in **Firestore**; the `expiresAt` field is a Timestamp so a TTL poli
 
 ### One-time GCP + OAuth setup
 
-0. **Enable APIs** (APIs & Services → Library): `sheets.googleapis.com`, `drive.googleapis.com`, `docs.googleapis.com`, `slides.googleapis.com`. (The deploy script also enables these.)
+0. **Enable APIs** (APIs & Services → Library): `sheets.googleapis.com`, `drive.googleapis.com`, `docs.googleapis.com`, `slides.googleapis.com`, `forms.googleapis.com`, `script.googleapis.com`. (The deploy script also enables these.)
 1. **OAuth consent screen** (APIs & Services → OAuth consent screen): set **User type = Internal** (org-only), add the scopes
-   `openid`, `email`, `.../auth/spreadsheets`, `.../auth/drive`, `.../auth/documents`, `.../auth/presentations`.
+   `openid`, `email`, `.../auth/spreadsheets`, `.../auth/drive`, `.../auth/documents`, `.../auth/presentations`, `.../auth/forms.body`, `.../auth/forms.responses.readonly`, `.../auth/script.projects`, `.../auth/script.deployments`.
 2. **OAuth client** (Credentials → Create credentials → OAuth client ID → **Web application**). After the first deploy you'll get the service URL; add the **Authorized redirect URI**:
    `https://<service-url>/oauth/google/callback`
 3. Note the client id + secret for the deploy step.
@@ -67,7 +67,7 @@ No client id/secret to paste — dynamic client registration handles it. You'll 
 
 ### 1. GCP Console
 
-1. Enable the [Sheets](https://console.cloud.google.com/apis/library/sheets.googleapis.com), [Drive](https://console.cloud.google.com/apis/library/drive.googleapis.com), [Docs](https://console.cloud.google.com/apis/library/docs.googleapis.com) and [Slides](https://console.cloud.google.com/apis/library/slides.googleapis.com) APIs.
+1. Enable the [Sheets](https://console.cloud.google.com/apis/library/sheets.googleapis.com), [Drive](https://console.cloud.google.com/apis/library/drive.googleapis.com), [Docs](https://console.cloud.google.com/apis/library/docs.googleapis.com), [Slides](https://console.cloud.google.com/apis/library/slides.googleapis.com), [Forms](https://console.cloud.google.com/apis/library/forms.googleapis.com) and [Apps Script](https://console.cloud.google.com/apis/library/script.googleapis.com) APIs.
 2. Create a [service account](https://console.cloud.google.com/iam-admin/serviceaccounts) and download the JSON key.
 
 ### 2. Share spreadsheets
@@ -76,7 +76,7 @@ Share each spreadsheet (or the Drive folder) with the service account email (`�
 
 ### 3. (Optional) Domain-wide delegation (Google Workspace)
 
-To act as any user in your domain: [Workspace Admin → Security → API controls → Domain-wide delegation](https://admin.google.com/ac/owl/domainwidedelegation), add the SA client ID with the `spreadsheets`, `drive`, `documents` + `presentations` scopes, and set `GOOGLE_IMPERSONATE_USER=user@yourdomain.com`.
+To act as any user in your domain: [Workspace Admin → Security → API controls → Domain-wide delegation](https://admin.google.com/ac/owl/domainwidedelegation), add the SA client ID with the `spreadsheets`, `drive`, `documents`, `presentations`, `forms.body`, `forms.responses.readonly`, `script.projects` + `script.deployments` scopes, and set `GOOGLE_IMPERSONATE_USER=user@yourdomain.com`.
 
 ### 4. Config
 
@@ -166,3 +166,35 @@ Layout: `src/tools/*` (shared tool implementations), `src/stdio.ts` (SA entry), 
 | `delete_slide` | Delete a slide/object by object id |
 | `get_slide_thumbnail` | Get a temporary PNG thumbnail URL for a slide |
 | `batch_update_slides_raw` | Advanced: send raw Slides API Request objects |
+
+### Forms
+
+| Tool | Description |
+|------|-------------|
+| `list_forms` | List Google Forms accessible to the caller; filter by name or folder |
+| `get_form` | Get structure: title, description, responderUri, linkedSheetId, items (type/required/options); optional raw JSON |
+| `create_form` | Create a new form (title/documentTitle); description applied via batchUpdate; optional folder |
+| `add_question` | High-level: add SHORT_TEXT/PARAGRAPH/MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN/LINEAR_SCALE/DATE/TIME; appends by default |
+| `update_form_info` | Update the form's title and/or description |
+| `delete_item` | Delete an item by itemId (index resolved via forms.get) |
+| `list_responses` | List responses flattened to `{responseId, createTime, respondentEmail?, answers:{[title]: value\|value[]}}`; optional filter/paging |
+| `batch_update_forms_raw` | Advanced: send raw Forms API Request objects |
+
+### Apps Script
+
+| Tool | Description |
+|------|-------------|
+| `list_script_projects` | List Apps Script projects accessible to the caller; filter by name or folder |
+| `create_script_project` | Create a project; pass `parentId` (Sheet/Doc/Form/Slides id) for a container-bound script |
+| `get_script_project` | Get metadata + files `[{name, type (SERVER_JS\|JSON\|HTML), source}]` |
+| `update_script_content` | Write files; merges by name and preserves the `appsscript` manifest (or `replaceAll`) |
+| `list_script_versions` | List saved versions |
+| `create_script_version` | Create an immutable version snapshot |
+| `list_script_deployments` | List deployments |
+| `create_script_deployment` | Deploy a version (`versionNumber`, optional `manifestFileName`) |
+| `run_script_function` | Execute a function via `scripts.run` (see caveats below) |
+| `get_script_processes` | List recent executions with function/type/status/timing |
+
+> **Apps Script caveats**
+> - **`run_script_function` is constrained.** `scripts.run` only works when the script's associated **GCP project is the same as this server's OAuth client project** *and* the script has an **"API Executable" deployment**. Most user-owned scripts won't qualify and will return 403/404. Creating, reading and updating project source works for any script the user owns.
+> - **Per-user Apps Script API switch.** Each user must turn on the Apps Script API once at [script.google.com/home/usersettings](https://script.google.com/home/usersettings) before the script tools work for them.

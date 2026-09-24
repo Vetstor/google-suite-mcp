@@ -11,6 +11,8 @@ import {
   getDriveClient,
   getDocsClient,
   getSlidesClient,
+  getFormsClient,
+  getScriptClient,
 } from "./auth.js";
 import { setServiceAccountEmailHint, type GetClients } from "./helpers.js";
 import { registerAllTools } from "./tools/index.js";
@@ -48,6 +50,8 @@ const getClients: GetClients = async () => ({
   drive: getDriveClient(),
   docs: getDocsClient(),
   slides: getSlidesClient(),
+  forms: getFormsClient(),
+  script: getScriptClient(),
 });
 
 registerAllTools(server, getClients);

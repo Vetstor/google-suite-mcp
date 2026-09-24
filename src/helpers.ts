@@ -1,5 +1,12 @@
 import type { GaxiosError } from "googleapis-common";
-import type { sheets_v4, drive_v3, docs_v1, slides_v1 } from "googleapis";
+import type {
+  sheets_v4,
+  drive_v3,
+  docs_v1,
+  slides_v1,
+  forms_v1,
+  script_v1,
+} from "googleapis";
 
 /** The Google API clients a tool needs, bound to a specific identity. */
 export interface GoogleClients {
@@ -7,6 +14,8 @@ export interface GoogleClients {
   drive: drive_v3.Drive;
   docs: docs_v1.Docs;
   slides: slides_v1.Slides;
+  forms: forms_v1.Forms;
+  script: script_v1.Script;
 }
 
 /** Lazily resolves the Google clients for the current caller (SA or per-user OAuth). */

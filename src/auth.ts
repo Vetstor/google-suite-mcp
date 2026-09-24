@@ -1,5 +1,12 @@
 import { google } from "googleapis";
-import type { sheets_v4, drive_v3, docs_v1, slides_v1 } from "googleapis";
+import type {
+  sheets_v4,
+  drive_v3,
+  docs_v1,
+  slides_v1,
+  forms_v1,
+  script_v1,
+} from "googleapis";
 import { readFileSync } from "fs";
 
 const SCOPES = [
@@ -7,6 +14,10 @@ const SCOPES = [
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/documents",
   "https://www.googleapis.com/auth/presentations",
+  "https://www.googleapis.com/auth/forms.body",
+  "https://www.googleapis.com/auth/forms.responses.readonly",
+  "https://www.googleapis.com/auth/script.projects",
+  "https://www.googleapis.com/auth/script.deployments",
 ];
 
 export interface ServiceAccountKey {
@@ -21,6 +32,8 @@ let _sheets: sheets_v4.Sheets | null = null;
 let _drive: drive_v3.Drive | null = null;
 let _docs: docs_v1.Docs | null = null;
 let _slides: slides_v1.Slides | null = null;
+let _forms: forms_v1.Forms | null = null;
+let _script: script_v1.Script | null = null;
 
 export function loadServiceAccountKey(): ServiceAccountKey {
   const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE;
@@ -97,6 +110,20 @@ export function getSlidesClient(): slides_v1.Slides {
   const auth = getAuth();
   _slides = google.slides({ version: "v1", auth });
   return _slides;
+}
+
+export function getFormsClient(): forms_v1.Forms {
+  if (_forms) return _forms;
+  const auth = getAuth();
+  _forms = google.forms({ version: "v1", auth });
+  return _forms;
+}
+
+export function getScriptClient(): script_v1.Script {
+  if (_script) return _script;
+  const auth = getAuth();
+  _script = google.script({ version: "v1", auth });
+  return _script;
 }
 
 export function getServiceAccountEmail(): string {

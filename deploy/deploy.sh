@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Deploy the remote Google Workspace MCP server (Sheets, Docs, Slides) to Cloud Run.
+# Deploy the remote Google Workspace MCP server (Sheets, Docs, Slides, Forms,
+# Apps Script) to Cloud Run.
 #
 # Prerequisites:
 #   - gcloud CLI authenticated (gcloud auth login) with rights on $PROJECT_ID
@@ -46,7 +47,9 @@ gcloud services enable \
   sheets.googleapis.com \
   drive.googleapis.com \
   docs.googleapis.com \
-  slides.googleapis.com
+  slides.googleapis.com \
+  forms.googleapis.com \
+  script.googleapis.com
 
 echo ">> Ensuring Firestore (native) database exists in $FIRESTORE_LOCATION..."
 if ! gcloud firestore databases describe --database="(default)" >/dev/null 2>&1; then

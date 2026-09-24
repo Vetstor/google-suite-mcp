@@ -38,6 +38,26 @@ const EXPECTED_TOOLS = [
   "delete_slide",
   "get_slide_thumbnail",
   "batch_update_slides_raw",
+  // Forms
+  "list_forms",
+  "get_form",
+  "create_form",
+  "add_question",
+  "update_form_info",
+  "delete_item",
+  "list_responses",
+  "batch_update_forms_raw",
+  // Apps Script
+  "list_script_projects",
+  "create_script_project",
+  "get_script_project",
+  "update_script_content",
+  "list_script_versions",
+  "create_script_version",
+  "list_script_deployments",
+  "create_script_deployment",
+  "run_script_function",
+  "get_script_processes",
 ];
 
 /** Extract JSON-RPC messages from an SSE response body. */
@@ -98,7 +118,7 @@ describe("/mcp bearer auth", () => {
     );
   });
 
-  it("lists all Sheets + Docs + Slides tools with a valid bearer token", async () => {
+  it("lists all Sheets + Docs + Slides + Forms + Apps Script tools with a valid bearer token", async () => {
     const { app, store } = buildApp();
     const token = "valid-access-token";
     await seedToken(store, token, "sub-1", SCOPE_VERSION);

@@ -6,6 +6,8 @@ import { registerValueTools } from "./values.js";
 import { registerAdvancedTools } from "./advanced.js";
 import { registerDocsTools } from "./docs.js";
 import { registerSlidesTools } from "./slides.js";
+import { registerFormsTools } from "./forms.js";
+import { registerScriptTools } from "./script.js";
 
 /**
  * Register all Google Workspace tools (Sheets + Docs + Slides) on an McpServer,
@@ -23,4 +25,8 @@ export function registerAllTools(server: McpServer, getClients: GetClients) {
   registerDocsTools(server, getClients);
   // Slides
   registerSlidesTools(server, getClients);
+  // Forms
+  registerFormsTools(server, getClients);
+  // Apps Script
+  registerScriptTools(server, getClients);
 }
