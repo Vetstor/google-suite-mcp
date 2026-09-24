@@ -1,108 +1,372 @@
-# google-mcp (Google Workspace MCP)
+# Google Workspace MCP
 
-Google Workspace MCP server with 48 tools for reading, writing, searching and managing **Sheets, Docs, Slides, Forms and Apps Script**. Two deployment modes:
+> Give every employee Claude access to Google Sheets, Docs, Slides, Forms and Apps Script — each under **their own Google identity**, admin-controlled.
 
-- **Remote / OAuth (multi-user)** — deploy to Cloud Run, add as a claude.ai custom connector. Each user logs in with their own Google account and the server acts on Sheets/Docs/Slides/Forms/Apps Script/Drive **as that user**, with that user's own permissions. Built for org rollout to many users.
-- **Stdio / service account (headless)** — a single service-account identity over stdio, for Claude Desktop / Claude Code / cron jobs.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node 20+](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
+[![MCP](https://img.shields.io/badge/MCP-connector-6E56CF.svg)](https://modelcontextprotocol.io)
+
+A remote, multi-user [MCP](https://modelcontextprotocol.io) server you host once for your whole
+organization. Users add it as a custom connector in claude.ai; each signs in with their own Google
+account (OAuth 2.1 + Dynamic Client Registration + PKCE) and Claude acts **as that user**, with that
+user's own Drive permissions. Logins are gated by an email-domain allowlist you control. A second
+**stdio / service-account** mode covers headless jobs and local dev.
+
+- **48 tools** across Sheets, Docs, Slides, Forms and Apps Script (+ Drive listing).
+- **Per-user identity** — no shared service account, no credential sprawl. Drive activity logs show
+  the real person.
+- **Admin-controlled** — Internal consent screen, domain allowlist, org-wide connector, instant
+  revoke.
+- **Cheap** — Cloud Run scales to zero, Firestore free tier; roughly **$0/month** for a small org.
 
 ---
 
-## Remote mode (OAuth 2.1, multi-user)
+## What you get
 
-### Architecture (in 6 lines)
+48 tools. High-level tools cover the common cases; each product also has a raw `batch_update_*_raw`
+escape hatch for anything the API supports.
 
-1. This server is its own OAuth 2.1 Authorization Server and brokers to Google (proxy pattern).
-2. claude.ai discovers `/.well-known/oauth-protected-resource/mcp` + `/.well-known/oauth-authorization-server`, registers via DCR (`/register`), and sends the user to `/authorize` (PKCE).
-3. `/authorize` stores a pending record and redirects the user to Google consent (`access_type=offline`, `prompt=consent`).
-4. `/oauth/google/callback` verifies the Google id_token, **enforces the email domain allowlist**, stores the user's Google refresh token **encrypted (AES-256-GCM)**, and returns our own auth code to claude.ai.
-5. `/token` (SDK-handled PKCE) issues an opaque access token (1h) + rotating refresh token (30d); only SHA-256 hashes are persisted.
-6. `/mcp` is a **stateless** Streamable HTTP endpoint behind `requireBearerAuth`; each request builds a per-user Google client (auto-refreshing, cached ~50 min) and runs the tools as that user.
+| Group | Count | Highlights |
+|-------|:----:|-----------|
+| Sheets | 13 | read/write ranges, append, search, formatting via raw batchUpdate |
+| Docs | 7 | create, read as text, append/insert/replace, raw batchUpdate |
+| Slides | 10 | build decks by layout, text/image placement, notes, thumbnails |
+| Forms | 8 | build forms, add questions, read flattened responses |
+| Apps Script | 10 | create bound scripts, push code, version, deploy, run |
 
-State lives in **Firestore**; the `expiresAt` field is a Timestamp so a TTL policy can auto-expire codes/tokens.
+<details><summary><b>Sheets (13)</b></summary>
 
-### One-time GCP + OAuth setup
+| Tool | Description |
+|------|-------------|
+| `list_spreadsheets` | List spreadsheets; filter by name or folder |
+| `get_spreadsheet` | Metadata: title, sheets (+ numeric sheetId), named ranges |
+| `read_range` | Read a range (A1); optional `asObjects` |
+| `batch_read` | Read multiple ranges in one call |
+| `write_range` | Write a 2D array to a range |
+| `batch_write` | Write to multiple ranges in one call |
+| `append_rows` | Append after existing data |
+| `clear_range` | Clear values (keeps formatting) |
+| `find_cells` | Client-side search; addresses + values (≤200) |
+| `create_spreadsheet` | Create a spreadsheet, optionally in a folder |
+| `add_sheet` | Add a tab |
+| `delete_sheet` | Delete a tab by id or title |
+| `batch_update_raw` | Raw Sheets API requests (format, merge, charts, pivots…) |
+</details>
 
-0. **Enable APIs** (APIs & Services → Library): `sheets.googleapis.com`, `drive.googleapis.com`, `docs.googleapis.com`, `slides.googleapis.com`, `forms.googleapis.com`, `script.googleapis.com`. (The deploy script also enables these.)
-1. **OAuth consent screen** (APIs & Services → OAuth consent screen): set **User type = Internal** (org-only), add the scopes
-   `openid`, `email`, `.../auth/spreadsheets`, `.../auth/drive`, `.../auth/documents`, `.../auth/presentations`, `.../auth/forms.body`, `.../auth/forms.responses.readonly`, `.../auth/script.projects`, `.../auth/script.deployments`.
-2. **OAuth client** (Credentials → Create credentials → OAuth client ID → **Web application**). After the first deploy you'll get the service URL; add the **Authorized redirect URI**:
-   `https://<service-url>/oauth/google/callback`
-3. Note the client id + secret for the deploy step.
+<details><summary><b>Docs (7)</b></summary>
 
-> **Re-consent after scope changes** — when the requested Google scopes change, the server bumps `SCOPE_VERSION` (in `src/remote/config.ts`). Already-connected users are then forced to re-run the Google login the next time they call the server (existing access tokens 401, refresh grants fail with `invalid_grant`) so they grant the new permissions. No action needed beyond reconnecting in claude.ai.
+| Tool | Description |
+|------|-------------|
+| `list_documents` | List Docs; filter by name or folder |
+| `get_document` | Doc as plain text (headings→`#`, bullets→`-`, tables→` \| `); optional raw JSON |
+| `create_document` | Create a doc, optional folder + initial text |
+| `append_text` | Append to body; optional heading style |
+| `insert_text` | Insert at a 1-based body index |
+| `replace_text` | Replace all occurrences |
+| `batch_update_docs_raw` | Raw Docs API requests (styles, tables, images…) |
+</details>
 
-### Deploy (Cloud Run)
+<details><summary><b>Slides (10)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `list_presentations` | List decks; filter by name or folder |
+| `get_presentation` | Structure: slides, elements, text, notes, placeholders; optional raw |
+| `create_presentation` | Create a deck, optional folder |
+| `add_slide` | Add a slide by layout; auto-fill title/body |
+| `replace_text_in_presentation` | Replace text across the deck (or given slides) |
+| `insert_text_box` | Add a text box (EMU position/size) |
+| `insert_image` | Insert an image from a public URL |
+| `delete_slide` | Delete a slide/object |
+| `get_slide_thumbnail` | Temporary PNG thumbnail URL |
+| `batch_update_slides_raw` | Raw Slides API requests |
+</details>
+
+<details><summary><b>Forms (8)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `list_forms` | List Forms; filter by name or folder |
+| `get_form` | Structure: items, types, options, responderUri, linkedSheetId |
+| `create_form` | Create a form; optional description + folder |
+| `add_question` | Add SHORT_TEXT/PARAGRAPH/MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN/LINEAR_SCALE/DATE/TIME |
+| `update_form_info` | Update title/description |
+| `delete_item` | Delete an item by itemId |
+| `list_responses` | Responses flattened + keyed by question title; filter/paging |
+| `batch_update_forms_raw` | Raw Forms API requests |
+</details>
+
+<details><summary><b>Apps Script (10)</b></summary>
+
+| Tool | Description |
+|------|-------------|
+| `list_script_projects` | List projects; filter by name or folder |
+| `create_script_project` | Create; `parentId` binds to a Sheet/Doc/Form/Slides file |
+| `get_script_project` | Metadata + source files |
+| `update_script_content` | Push files; merges by name, keeps `appsscript` manifest |
+| `list_script_versions` | List saved versions |
+| `create_script_version` | Create an immutable version |
+| `list_script_deployments` | List deployments |
+| `create_script_deployment` | Deploy a version |
+| `run_script_function` | Run a function via `scripts.run` (constrained — see skill) |
+| `get_script_processes` | Recent executions with status/timing |
+</details>
+
+---
+
+## Quick start — org-wide rollout (~15 min)
+
+For a Google Workspace admin. You'll host the server on your own Google Cloud project and hand users
+a single connector URL. Commands use the **gcloud CLI**; a few steps are console-only (linked).
+
+**Prerequisites**
+- A Google Cloud project with **billing enabled** (Cloud Run's free tier covers small orgs).
+- [`gcloud` CLI](https://cloud.google.com/sdk/docs/install) installed and `gcloud auth login` done.
+- **Node 20+**. On Windows run the deploy script from **Git Bash** or **WSL**.
+- Rights to configure the OAuth consent screen for your Workspace org.
+
+### 1. Create & select the project
 
 ```bash
-export PROJECT_ID=your-gcp-project
-export GOOGLE_OAUTH_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
-export GOOGLE_OAUTH_CLIENT_SECRET=your-oauth-client-secret
-export ALLOWED_DOMAINS=vetstor.cz          # comma-separated; omit to allow all
-bash deploy/deploy.sh
+gcloud projects create your-project-id --name="Workspace MCP"
+gcloud config set project your-project-id
+```
+Link billing in the console: <https://console.cloud.google.com/billing/linkedaccount?project=your-project-id>
+
+Grab the project number — you'll need it for the OAuth redirect URI:
+```bash
+gcloud projects describe your-project-id --format='value(projectNumber)'
 ```
 
-The script enables the required APIs, creates the Firestore native DB (`europe-west1`), creates the secrets `sheets-mcp-google-client-secret` and `sheets-mcp-token-key` (32-byte key via `openssl`), grants the Cloud Run service account `secretmanager.secretAccessor` + `datastore.user`, deploys, and prints the service URL. On the first run it deploys once to reserve the URL, then sets `BASE_URL` to it. **After the first deploy, add the redirect URI (step 2 above) and re-run if needed.**
+### 2. Enable the APIs
 
-### Add to claude.ai
+```bash
+gcloud services enable \
+  run.googleapis.com firestore.googleapis.com secretmanager.googleapis.com \
+  cloudbuild.googleapis.com artifactregistry.googleapis.com \
+  sheets.googleapis.com drive.googleapis.com docs.googleapis.com \
+  slides.googleapis.com forms.googleapis.com script.googleapis.com
+```
 
-Settings → **Connectors** → **Add custom connector** → URL:
+### 3. Configure the OAuth consent screen (console)
 
+<https://console.cloud.google.com/auth/overview>
+
+- **User type: Internal** (only your Workspace's users can log in — the tightest control).
+- Add these scopes at <https://console.cloud.google.com/auth/scopes>:
+
+  ```
+  openid
+  email
+  https://www.googleapis.com/auth/spreadsheets
+  https://www.googleapis.com/auth/drive
+  https://www.googleapis.com/auth/documents
+  https://www.googleapis.com/auth/presentations
+  https://www.googleapis.com/auth/forms.body
+  https://www.googleapis.com/auth/forms.responses.readonly
+  https://www.googleapis.com/auth/script.projects
+  https://www.googleapis.com/auth/script.deployments
+  ```
+
+### 4. Create the OAuth client (console)
+
+<https://console.cloud.google.com/auth/clients> → **Create client** → **Web application**.
+
+The redirect URI is deterministic on Cloud Run, so you can set it now (service name `sheets-mcp`,
+region `europe-west1`):
+```
+https://sheets-mcp-PROJECT_NUMBER.europe-west1.run.app/oauth/google/callback
+```
+Replace `PROJECT_NUMBER` with the number from step 1. Note the generated **client id** and **client
+secret**.
+
+### 5. Clone, install, test
+
+```bash
+git clone https://github.com/your-org/google-workspace-mcp.git
+cd google-workspace-mcp
+npm install
+npm test
+```
+
+### 6. Deploy to Cloud Run
+
+```bash
+export PROJECT_ID=your-project-id
+export GOOGLE_OAUTH_CLIENT_ID=PROJECT_NUMBER-abc.apps.googleusercontent.com
+export GOOGLE_OAUTH_CLIENT_SECRET=your-client-secret
+export ALLOWED_DOMAINS=example.com          # comma-separated; omit to allow all
+bash deploy/deploy.sh
+```
+The script enables APIs, creates the Firestore database, generates the token-encryption key and
+stores both secrets in Secret Manager, grants IAM, deploys, and prints your **service URL**.
+
+> **New-project build fails with a permissions error?** Grant the Cloud Build role and re-run:
+> ```bash
+> gcloud projects add-iam-policy-binding your-project-id \
+>   --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+>   --role="roles/cloudbuild.builds.builder"
+> ```
+
+If the printed URL differs from step 4's guess, update the OAuth client's redirect URI to
+`<service-url>/oauth/google/callback`.
+
+### 7. Publish the connector to your org
+
+<https://claude.ai/settings/connectors> → **Add custom connector** → paste:
 ```
 https://<service-url>/mcp
 ```
+No client id/secret to enter — Dynamic Client Registration handles it. As an admin, add it under
+**Organization connectors** so everyone gets it. Claude Code picks up connectors automatically on a
+new session.
 
-No client id/secret to paste — dynamic client registration handles it. You'll be sent to Google to log in; only accounts in `ALLOWED_DOMAINS` are accepted.
+### 8. Verify
 
-### Security notes
+In Claude: **"list my recent spreadsheets."** You'll be sent to Google to sign in once, then Claude
+returns your files.
 
-- **Domain restriction** — logins outside `ALLOWED_DOMAINS` get 403 and no data is stored. If unset, all Google accounts are accepted (logged as a warning).
-- **Encrypted refresh tokens** — each user's Google refresh token is AES-256-GCM encrypted with `TOKEN_ENCRYPTION_KEY` before hitting Firestore.
-- **Hashed tokens** — our access/refresh codes and tokens are stored only as SHA-256 hashes; auth codes are single-use and refresh tokens rotate on every use.
-- **Revocation** — `/revoke` (RFC 7009) is supported and drops the user's cached Google client.
-- Tokens/codes/secrets are never logged (pino redaction); logins log only `email` + `sub`.
+<details><summary>Optional hardening & extras</summary>
+
+- **Firestore auto-expiry (TTL)** — let expired tokens/codes self-delete:
+  ```bash
+  for c in accessTokens refreshTokens authCodes pendingAuth; do
+    gcloud firestore fields ttls update expiresAt --collection-group="$c" --enable-ttl --async
+  done
+  ```
+- **Apps Script tools** — each user enables the Apps Script API once at
+  <https://script.google.com/home/usersettings>.
+- **Custom domain** — map one to the Cloud Run service and set `BASE_URL` to it (then update the
+  redirect URI accordingly).
+</details>
 
 ---
 
-## Stdio mode (service account)
+## For admins
 
-### 1. GCP Console
+- **What users can do:** exactly what their own Google account can — read/write the Sheets, Docs,
+  Slides, Forms and Apps Script files they already have access to. No user can reach anything they
+  couldn't open in Drive themselves.
+- **What they can't:** log in from outside `ALLOWED_DOMAINS` (403, nothing stored); access other
+  people's private files; run arbitrary Apps Script that isn't theirs.
+- **Revoke access** — per user: they visit <https://myaccount.google.com/permissions> and remove the
+  app, or you disable the connector org-wide in claude.ai. `/revoke` (RFC 7009) drops the cached
+  Google client immediately.
+- **Audit** — because every call runs as the real user, Google Drive activity and audit logs
+  attribute edits to the actual person, not a shared robot.
+- **Cost** — Cloud Run scales to zero (you pay only per request); Firestore usage sits in the free
+  tier for small orgs. Expect ~**$0/month** at low volume.
+- **Where tokens live** — in **your** GCP project's Firestore. Each user's Google refresh token is
+  **AES-256-GCM encrypted** at rest; your own access/refresh tokens are stored only as SHA-256
+  hashes. Nothing is sent to third parties.
+- **Rotate the OAuth secret** — create a new secret in the console, then:
+  ```bash
+  printf '%s' 'NEW_SECRET' | gcloud secrets versions add sheets-mcp-google-client-secret --data-file=-
+  gcloud run services update sheets-mcp --region europe-west1 \
+    --update-secrets GOOGLE_OAUTH_CLIENT_SECRET=sheets-mcp-google-client-secret:latest
+  ```
+  Do **not** rotate `TOKEN_ENCRYPTION_KEY` unless you intend to invalidate every stored refresh token
+  (all users re-consent).
 
-1. Enable the [Sheets](https://console.cloud.google.com/apis/library/sheets.googleapis.com), [Drive](https://console.cloud.google.com/apis/library/drive.googleapis.com), [Docs](https://console.cloud.google.com/apis/library/docs.googleapis.com), [Slides](https://console.cloud.google.com/apis/library/slides.googleapis.com), [Forms](https://console.cloud.google.com/apis/library/forms.googleapis.com) and [Apps Script](https://console.cloud.google.com/apis/library/script.googleapis.com) APIs.
-2. Create a [service account](https://console.cloud.google.com/iam-admin/serviceaccounts) and download the JSON key.
+> **Personal Gmail / solo dev?** Same steps, with two changes in step 3: set **User type: External**
+> and add yourself under **Test users**. Leave `ALLOWED_DOMAINS` unset (or set it to your address's
+> domain). Everything else is identical.
 
-### 2. Share spreadsheets
+---
 
-Share each spreadsheet (or the Drive folder) with the service account email (`…@….iam.gserviceaccount.com`).
+## Quick start — local (stdio, service account)
 
-### 3. (Optional) Domain-wide delegation (Google Workspace)
+Headless mode for cron jobs, local dev, or a single-identity setup. One service account acts on
+everything shared with it.
 
-To act as any user in your domain: [Workspace Admin → Security → API controls → Domain-wide delegation](https://admin.google.com/ac/owl/domainwidedelegation), add the SA client ID with the `spreadsheets`, `drive`, `documents`, `presentations`, `forms.body`, `forms.responses.readonly`, `script.projects` + `script.deployments` scopes, and set `GOOGLE_IMPERSONATE_USER=user@yourdomain.com`.
+1. Enable the same APIs (step 2 above) in a project.
+2. Create a **service account** and download its JSON key
+   (<https://console.cloud.google.com/iam-admin/serviceaccounts>).
+3. **Share** each spreadsheet/doc/folder with the service account's email
+   (`…@….iam.gserviceaccount.com`). *(Optional: domain-wide delegation + `GOOGLE_IMPERSONATE_USER`
+   to act as any user in your Workspace.)*
+4. `npm install && npm run build`
+5. Register with Claude Code:
+   ```bash
+   claude mcp add google-workspace \
+     -e GOOGLE_SERVICE_ACCOUNT_KEY_FILE=/path/to/service-account.json \
+     -- node /absolute/path/to/dist/stdio.js
+   ```
+   or add `.mcp.json` to a project:
+   ```json
+   {
+     "mcpServers": {
+       "google-workspace": {
+         "command": "node",
+         "args": ["/absolute/path/to/dist/stdio.js"],
+         "env": { "GOOGLE_SERVICE_ACCOUNT_KEY_FILE": "/path/to/service-account.json" }
+       }
+     }
+   }
+   ```
+6. **Claude Desktop** uses the same block under `mcpServers` in its config file.
 
-### 4. Config
+---
 
-Copy `.env.example` to `.env` and fill in the key path. Then in **Claude Desktop** / **Claude Code**:
+## How auth works (remote mode)
 
-```json
-{
-  "mcpServers": {
-    "sheets": {
-      "command": "node",
-      "args": ["/absolute/path/to/sheets-mcp/dist/stdio.js"],
-      "env": {
-        "GOOGLE_SERVICE_ACCOUNT_KEY_FILE": "/path/to/service-account.json"
-      }
-    }
-  }
-}
+This server is its own OAuth 2.1 Authorization Server and brokers to Google (proxy pattern).
+
+```
+claude.ai ──DCR /register──▶ MCP server
+claude.ai ──/authorize (PKCE)─▶ MCP server ──▶ Google consent ──▶ /oauth/google/callback
+   (verify id_token, enforce domain allowlist, store ENCRYPTED refresh token)
+claude.ai ──/token──▶ MCP server  ⇒ opaque access token (1h) + rotating refresh token (30d)
+claude.ai ──/mcp (Bearer)─▶ MCP server ⇒ builds a per-user Google client, runs the tool AS the user
 ```
 
-### 5. Build & run
+1. Discovery via `/.well-known/oauth-protected-resource/mcp` + `/.well-known/oauth-authorization-server`.
+2. `/authorize` redirects to Google (`access_type=offline`, `prompt=consent`).
+3. `/oauth/google/callback` verifies the Google id_token, **enforces `ALLOWED_DOMAINS`**, and stores
+   the user's refresh token AES-256-GCM encrypted.
+4. `/token` issues an opaque access token + rotating refresh token; only SHA-256 hashes are persisted.
+5. `/mcp` is a stateless Streamable HTTP endpoint behind `requireBearerAuth`.
+6. State lives in **Firestore**; `expiresAt` is a Timestamp so a TTL policy auto-expires codes/tokens.
 
-```bash
-npm install
-npm run build
-npm run start:stdio     # or: npm run dev:stdio
-```
+**Security**
+- **Domain allowlist** — logins outside `ALLOWED_DOMAINS` get 403; nothing is stored.
+- **Encrypted refresh tokens** — AES-256-GCM with `TOKEN_ENCRYPTION_KEY` before Firestore.
+- **Hashed tokens** — access/refresh tokens stored as SHA-256 only; auth codes are single-use;
+  refresh tokens rotate on every use.
+- **Scope versioning** — bump `SCOPE_VERSION` (`src/remote/config.ts`) when scopes change to force
+  every user to re-consent on their next call.
+- **Revocation** — `/revoke` (RFC 7009); users can also revoke at
+  <https://myaccount.google.com/permissions>.
+
+---
+
+## Skill
+
+A bundled [Claude skill](skills/google-workspace) teaches Claude to use these tools well: index math
+(Sheets 0-based GridRange, Docs 1-based indexes), EMU layout for Slides, and ready-to-paste raw
+`batchUpdate` recipes for formatting, charts, pivots, tables, forms and bound Apps Script. Copy
+`skills/google-workspace/` into a repo's `.claude/skills/` or `~/.claude/skills/`. See
+[skills/README.md](skills/README.md).
+
+---
+
+## Configuration
+
+| Env var | Mode | Description |
+|---------|------|-------------|
+| `BASE_URL` | remote | Public https URL, no trailing slash (Cloud Run service URL). |
+| `GOOGLE_OAUTH_CLIENT_ID` | remote | OAuth "Web application" client id. |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | remote | OAuth client secret (via Secret Manager in prod). |
+| `TOKEN_ENCRYPTION_KEY` | remote | Base64 32-byte AES key (`openssl rand -base64 32`). Keep stable. |
+| `ALLOWED_DOMAINS` | remote | Comma-separated email domains. Unset = allow all (warns). |
+| `STORE` | remote | `firestore` (default) or `memory` (dev/tests). |
+| `FIRESTORE_DATABASE` | remote | Firestore database id. Default `(default)`. |
+| `PORT` | remote | Listen port. Default 8080 (Cloud Run injects it). |
+| `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` | stdio | Path to the service-account JSON key. |
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | stdio | …or the raw JSON (or base64) instead of a file path. |
+| `GOOGLE_IMPERSONATE_USER` | stdio | Impersonate a Workspace user (domain-wide delegation). |
+
+See [`.env.example`](.env.example) for the full annotated list.
 
 ---
 
@@ -110,91 +374,25 @@ npm run start:stdio     # or: npm run dev:stdio
 
 ```bash
 npm install
-npm run build           # strict TypeScript -> dist/
-npm test                # vitest (MemoryStore + supertest, Google mocked)
-npm run dev             # remote server via tsx (needs remote env vars)
-npm run dev:stdio       # stdio server via tsx (needs service-account env)
+npm run build        # strict TypeScript → dist/
+npm test             # vitest (MemoryStore + supertest, Google mocked)
+npm run dev          # remote server via tsx (needs remote env vars)
+npm run dev:stdio    # stdio server via tsx (needs service-account env)
 ```
 
-Layout: `src/tools/*` (shared tool implementations), `src/stdio.ts` (SA entry), `src/remote/*` (express app, OAuth provider, Firestore/Memory store, Google helpers, crypto, config), `test/*` (vitest).
+Layout: `src/tools/*` (shared tool implementations), `src/stdio.ts` (service-account entry),
+`src/remote/*` (express app, OAuth provider, Firestore/Memory store, Google helpers, crypto,
+config), `test/*` (vitest).
+
+**Adding a new Google API**
+- Request the new OAuth scope in `src/remote/config.ts` and **bump `SCOPE_VERSION`**.
+- Add the scope to the consent screen and (for stdio) the service account's delegation.
+- Add a `registerXxxTools(server, getClients)` module under `src/tools/` and wire it into
+  `src/tools/index.ts`.
+- Enable the API (`gcloud services enable …`) and add it to `deploy/deploy.sh`.
 
 ---
 
-## Tools
+## License
 
-### Sheets
-
-| Tool | Description |
-|------|-------------|
-| `list_spreadsheets` | List spreadsheets accessible to the caller; filter by name or folder |
-| `get_spreadsheet` | Get metadata: title, sheets, named ranges |
-| `read_range` | Read cell values (A1 notation); optionally return as objects |
-| `batch_read` | Read multiple ranges in one call |
-| `write_range` | Write a 2D array of values to a range |
-| `batch_write` | Write to multiple ranges in one call |
-| `append_rows` | Append rows after existing data |
-| `clear_range` | Clear values in a range (keeps formatting) |
-| `find_cells` | Client-side search; returns cell addresses + values (max 200) |
-| `create_spreadsheet` | Create a new spreadsheet, optionally in a folder |
-| `add_sheet` | Add a sheet tab |
-| `delete_sheet` | Delete a sheet tab by ID or title |
-| `batch_update_raw` | Advanced: send raw Sheets API Request objects (formatting, merges, etc.) |
-
-### Docs
-
-| Tool | Description |
-|------|-------------|
-| `list_documents` | List Google Docs accessible to the caller; filter by name or folder |
-| `get_document` | Get a doc as plain text (headings → `#`, bullets → `- `, tables → ` \| `); optional raw JSON |
-| `create_document` | Create a new doc, optionally in a folder and with initial text |
-| `append_text` | Append text to the end of the body; optional heading style |
-| `insert_text` | Insert text at an explicit 1-based body index (index 1 = start) |
-| `replace_text` | Replace all occurrences of a string; returns occurrencesChanged |
-| `batch_update_docs_raw` | Advanced: send raw Docs API Request objects |
-
-### Slides
-
-| Tool | Description |
-|------|-------------|
-| `list_presentations` | List presentations accessible to the caller; filter by name or folder |
-| `get_presentation` | Get structure: slides, elements, text, notes, placeholder types; optional raw JSON |
-| `create_presentation` | Create a new presentation, optionally in a folder |
-| `add_slide` | Add a slide by predefined layout; optionally fill title/body placeholders |
-| `replace_text_in_presentation` | Replace all occurrences across the deck (or specific slides) |
-| `insert_text_box` | Add a text box with text (EMU position/size; 1 in = 914400 EMU) |
-| `insert_image` | Insert an image from a public URL (EMU position/size) |
-| `delete_slide` | Delete a slide/object by object id |
-| `get_slide_thumbnail` | Get a temporary PNG thumbnail URL for a slide |
-| `batch_update_slides_raw` | Advanced: send raw Slides API Request objects |
-
-### Forms
-
-| Tool | Description |
-|------|-------------|
-| `list_forms` | List Google Forms accessible to the caller; filter by name or folder |
-| `get_form` | Get structure: title, description, responderUri, linkedSheetId, items (type/required/options); optional raw JSON |
-| `create_form` | Create a new form (title/documentTitle); description applied via batchUpdate; optional folder |
-| `add_question` | High-level: add SHORT_TEXT/PARAGRAPH/MULTIPLE_CHOICE/CHECKBOXES/DROPDOWN/LINEAR_SCALE/DATE/TIME; appends by default |
-| `update_form_info` | Update the form's title and/or description |
-| `delete_item` | Delete an item by itemId (index resolved via forms.get) |
-| `list_responses` | List responses flattened to `{responseId, createTime, respondentEmail?, answers:{[title]: value\|value[]}}`; optional filter/paging |
-| `batch_update_forms_raw` | Advanced: send raw Forms API Request objects |
-
-### Apps Script
-
-| Tool | Description |
-|------|-------------|
-| `list_script_projects` | List Apps Script projects accessible to the caller; filter by name or folder |
-| `create_script_project` | Create a project; pass `parentId` (Sheet/Doc/Form/Slides id) for a container-bound script |
-| `get_script_project` | Get metadata + files `[{name, type (SERVER_JS\|JSON\|HTML), source}]` |
-| `update_script_content` | Write files; merges by name and preserves the `appsscript` manifest (or `replaceAll`) |
-| `list_script_versions` | List saved versions |
-| `create_script_version` | Create an immutable version snapshot |
-| `list_script_deployments` | List deployments |
-| `create_script_deployment` | Deploy a version (`versionNumber`, optional `manifestFileName`) |
-| `run_script_function` | Execute a function via `scripts.run` (see caveats below) |
-| `get_script_processes` | List recent executions with function/type/status/timing |
-
-> **Apps Script caveats**
-> - **`run_script_function` is constrained.** `scripts.run` only works when the script's associated **GCP project is the same as this server's OAuth client project** *and* the script has an **"API Executable" deployment**. Most user-owned scripts won't qualify and will return 403/404. Creating, reading and updating project source works for any script the user owns.
-> - **Per-user Apps Script API switch.** Each user must turn on the Apps Script API once at [script.google.com/home/usersettings](https://script.google.com/home/usersettings) before the script tools work for them.
+[MIT](LICENSE)

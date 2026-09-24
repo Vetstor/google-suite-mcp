@@ -15,7 +15,7 @@
 #   GOOGLE_OAUTH_CLIENT_SECRET     OAuth client secret (only used to create the
 #                                  Secret Manager secret the first time)
 # Optional env:
-#   ALLOWED_DOMAINS                comma-separated allowlist, e.g. "vetstor.cz"
+#   ALLOWED_DOMAINS                comma-separated allowlist, e.g. "example.com"
 #   SERVICE_NAME     (default: sheets-mcp)
 #   REGION           (default: europe-west1)
 #   FIRESTORE_LOCATION (default: europe-west1)
