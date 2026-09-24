@@ -41,6 +41,8 @@ export interface GoogleIdentity {
   email: string;
   hd?: string;
   refreshToken?: string;
+  /** Space-delimited scopes Google actually granted (token response `scope`). */
+  grantedScopes?: string;
 }
 
 /**
@@ -69,6 +71,7 @@ export async function exchangeGoogleCode(
     email: payload.email.toLowerCase(),
     hd: payload.hd,
     refreshToken: tokens.refresh_token ?? undefined,
+    grantedScopes: tokens.scope ?? undefined,
   };
 }
 
@@ -110,6 +113,8 @@ export async function getUserClients(
   const clients: GoogleClients = {
     sheets: google.sheets({ version: "v4", auth }),
     drive: google.drive({ version: "v3", auth }),
+    docs: google.docs({ version: "v1", auth }),
+    slides: google.slides({ version: "v1", auth }),
   };
   cache.set(sub, { clients, expiresAt: Date.now() + CACHE_TTL_MS });
   return clients;

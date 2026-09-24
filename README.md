@@ -1,8 +1,8 @@
-# sheets-mcp
+# google-mcp (Google Workspace MCP)
 
-Google Sheets MCP server with 13 tools for reading, writing, searching and managing spreadsheets. Two deployment modes:
+Google Workspace MCP server with 30 tools for reading, writing, searching and managing **Sheets, Docs and Slides**. Two deployment modes:
 
-- **Remote / OAuth (multi-user)** — deploy to Cloud Run, add as a claude.ai custom connector. Each user logs in with their own Google account and the server acts on Sheets/Drive **as that user**, with that user's own permissions. Built for org rollout to many users.
+- **Remote / OAuth (multi-user)** — deploy to Cloud Run, add as a claude.ai custom connector. Each user logs in with their own Google account and the server acts on Sheets/Docs/Slides/Drive **as that user**, with that user's own permissions. Built for org rollout to many users.
 - **Stdio / service account (headless)** — a single service-account identity over stdio, for Claude Desktop / Claude Code / cron jobs.
 
 ---
@@ -22,11 +22,14 @@ State lives in **Firestore**; the `expiresAt` field is a Timestamp so a TTL poli
 
 ### One-time GCP + OAuth setup
 
+0. **Enable APIs** (APIs & Services → Library): `sheets.googleapis.com`, `drive.googleapis.com`, `docs.googleapis.com`, `slides.googleapis.com`. (The deploy script also enables these.)
 1. **OAuth consent screen** (APIs & Services → OAuth consent screen): set **User type = Internal** (org-only), add the scopes
-   `openid`, `email`, `.../auth/spreadsheets`, `.../auth/drive`.
+   `openid`, `email`, `.../auth/spreadsheets`, `.../auth/drive`, `.../auth/documents`, `.../auth/presentations`.
 2. **OAuth client** (Credentials → Create credentials → OAuth client ID → **Web application**). After the first deploy you'll get the service URL; add the **Authorized redirect URI**:
    `https://<service-url>/oauth/google/callback`
 3. Note the client id + secret for the deploy step.
+
+> **Re-consent after scope changes** — when the requested Google scopes change, the server bumps `SCOPE_VERSION` (in `src/remote/config.ts`). Already-connected users are then forced to re-run the Google login the next time they call the server (existing access tokens 401, refresh grants fail with `invalid_grant`) so they grant the new permissions. No action needed beyond reconnecting in claude.ai.
 
 ### Deploy (Cloud Run)
 
@@ -64,7 +67,7 @@ No client id/secret to paste — dynamic client registration handles it. You'll 
 
 ### 1. GCP Console
 
-1. Enable [Sheets API](https://console.cloud.google.com/apis/library/sheets.googleapis.com) and [Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com).
+1. Enable the [Sheets](https://console.cloud.google.com/apis/library/sheets.googleapis.com), [Drive](https://console.cloud.google.com/apis/library/drive.googleapis.com), [Docs](https://console.cloud.google.com/apis/library/docs.googleapis.com) and [Slides](https://console.cloud.google.com/apis/library/slides.googleapis.com) APIs.
 2. Create a [service account](https://console.cloud.google.com/iam-admin/serviceaccounts) and download the JSON key.
 
 ### 2. Share spreadsheets
@@ -73,7 +76,7 @@ Share each spreadsheet (or the Drive folder) with the service account email (`�
 
 ### 3. (Optional) Domain-wide delegation (Google Workspace)
 
-To act as any user in your domain: [Workspace Admin → Security → API controls → Domain-wide delegation](https://admin.google.com/ac/owl/domainwidedelegation), add the SA client ID with the `spreadsheets` + `drive` scopes, and set `GOOGLE_IMPERSONATE_USER=user@yourdomain.com`.
+To act as any user in your domain: [Workspace Admin → Security → API controls → Domain-wide delegation](https://admin.google.com/ac/owl/domainwidedelegation), add the SA client ID with the `spreadsheets`, `drive`, `documents` + `presentations` scopes, and set `GOOGLE_IMPERSONATE_USER=user@yourdomain.com`.
 
 ### 4. Config
 
@@ -119,6 +122,8 @@ Layout: `src/tools/*` (shared tool implementations), `src/stdio.ts` (SA entry), 
 
 ## Tools
 
+### Sheets
+
 | Tool | Description |
 |------|-------------|
 | `list_spreadsheets` | List spreadsheets accessible to the caller; filter by name or folder |
@@ -134,3 +139,30 @@ Layout: `src/tools/*` (shared tool implementations), `src/stdio.ts` (SA entry), 
 | `add_sheet` | Add a sheet tab |
 | `delete_sheet` | Delete a sheet tab by ID or title |
 | `batch_update_raw` | Advanced: send raw Sheets API Request objects (formatting, merges, etc.) |
+
+### Docs
+
+| Tool | Description |
+|------|-------------|
+| `list_documents` | List Google Docs accessible to the caller; filter by name or folder |
+| `get_document` | Get a doc as plain text (headings → `#`, bullets → `- `, tables → ` \| `); optional raw JSON |
+| `create_document` | Create a new doc, optionally in a folder and with initial text |
+| `append_text` | Append text to the end of the body; optional heading style |
+| `insert_text` | Insert text at an explicit 1-based body index (index 1 = start) |
+| `replace_text` | Replace all occurrences of a string; returns occurrencesChanged |
+| `batch_update_docs_raw` | Advanced: send raw Docs API Request objects |
+
+### Slides
+
+| Tool | Description |
+|------|-------------|
+| `list_presentations` | List presentations accessible to the caller; filter by name or folder |
+| `get_presentation` | Get structure: slides, elements, text, notes, placeholder types; optional raw JSON |
+| `create_presentation` | Create a new presentation, optionally in a folder |
+| `add_slide` | Add a slide by predefined layout; optionally fill title/body placeholders |
+| `replace_text_in_presentation` | Replace all occurrences across the deck (or specific slides) |
+| `insert_text_box` | Add a text box with text (EMU position/size; 1 in = 914400 EMU) |
+| `insert_image` | Insert an image from a public URL (EMU position/size) |
+| `delete_slide` | Delete a slide/object by object id |
+| `get_slide_thumbnail` | Get a temporary PNG thumbnail URL for a slide |
+| `batch_update_slides_raw` | Advanced: send raw Slides API Request objects |

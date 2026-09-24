@@ -1,10 +1,12 @@
 import type { GaxiosError } from "googleapis-common";
-import type { sheets_v4, drive_v3 } from "googleapis";
+import type { sheets_v4, drive_v3, docs_v1, slides_v1 } from "googleapis";
 
-/** The pair of Google API clients a tool needs, bound to a specific identity. */
+/** The Google API clients a tool needs, bound to a specific identity. */
 export interface GoogleClients {
   sheets: sheets_v4.Sheets;
   drive: drive_v3.Drive;
+  docs: docs_v1.Docs;
+  slides: slides_v1.Slides;
 }
 
 /** Lazily resolves the Google clients for the current caller (SA or per-user OAuth). */
@@ -28,6 +30,16 @@ export function parseSpreadsheetId(idOrUrl: string): string {
   const match = idOrUrl.match(/\/d\/([a-zA-Z0-9_-]+)/);
   if (match) return match[1];
   // Assume it's already a bare ID
+  return idOrUrl.trim();
+}
+
+/**
+ * Extract a Drive file ID from a bare ID or any Google file URL that uses the
+ * `/d/<id>/…` shape (Docs, Slides, Sheets). Falls back to the trimmed input.
+ */
+export function parseDriveId(idOrUrl: string): string {
+  const match = idOrUrl.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
   return idOrUrl.trim();
 }
 

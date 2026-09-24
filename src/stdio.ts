@@ -9,6 +9,8 @@ import {
   getServiceAccountEmail,
   getSheetsClient,
   getDriveClient,
+  getDocsClient,
+  getSlidesClient,
 } from "./auth.js";
 import { setServiceAccountEmailHint, type GetClients } from "./helpers.js";
 import { registerAllTools } from "./tools/index.js";
@@ -36,7 +38,7 @@ validateAuth();
 setServiceAccountEmailHint(getServiceAccountEmail);
 
 const server = new McpServer({
-  name: "sheets-mcp",
+  name: "google-workspace-mcp",
   version: "1.0.0",
 });
 
@@ -44,6 +46,8 @@ const server = new McpServer({
 const getClients: GetClients = async () => ({
   sheets: getSheetsClient(),
   drive: getDriveClient(),
+  docs: getDocsClient(),
+  slides: getSlidesClient(),
 });
 
 registerAllTools(server, getClients);

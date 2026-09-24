@@ -1,10 +1,12 @@
 import { google } from "googleapis";
-import type { sheets_v4, drive_v3 } from "googleapis";
+import type { sheets_v4, drive_v3, docs_v1, slides_v1 } from "googleapis";
 import { readFileSync } from "fs";
 
 const SCOPES = [
   "https://www.googleapis.com/auth/spreadsheets",
   "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/presentations",
 ];
 
 export interface ServiceAccountKey {
@@ -17,6 +19,8 @@ export interface ServiceAccountKey {
 let _auth: InstanceType<typeof google.auth.JWT> | null = null;
 let _sheets: sheets_v4.Sheets | null = null;
 let _drive: drive_v3.Drive | null = null;
+let _docs: docs_v1.Docs | null = null;
+let _slides: slides_v1.Slides | null = null;
 
 export function loadServiceAccountKey(): ServiceAccountKey {
   const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE;
@@ -79,6 +83,20 @@ export function getDriveClient(): drive_v3.Drive {
   const auth = getAuth();
   _drive = google.drive({ version: "v3", auth });
   return _drive;
+}
+
+export function getDocsClient(): docs_v1.Docs {
+  if (_docs) return _docs;
+  const auth = getAuth();
+  _docs = google.docs({ version: "v1", auth });
+  return _docs;
+}
+
+export function getSlidesClient(): slides_v1.Slides {
+  if (_slides) return _slides;
+  const auth = getAuth();
+  _slides = google.slides({ version: "v1", auth });
+  return _slides;
 }
 
 export function getServiceAccountEmail(): string {

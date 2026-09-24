@@ -1,7 +1,7 @@
 {
-  "name": "sheets-mcp",
+  "name": "google-mcp",
   "version": "1.0.0",
-  "description": "Google Sheets MCP server — remote OAuth (multi-user) + stdio (service account)",
+  "description": "Google Workspace MCP server (Sheets, Docs, Slides) — remote OAuth (multi-user) + stdio (service account)",
   "type": "module",
   "bin": {
     "sheets-mcp": "dist/stdio.js"

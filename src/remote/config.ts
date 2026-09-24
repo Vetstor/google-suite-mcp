@@ -9,7 +9,18 @@ export const GOOGLE_SCOPES = [
   "email",
   "https://www.googleapis.com/auth/spreadsheets",
   "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/presentations",
 ];
+
+/**
+ * Bump whenever GOOGLE_SCOPES changes so previously-authorized users are forced
+ * to re-consent. A user's stored `scopeVersion` is compared against this on
+ * every access-token verification and refresh-token grant; a mismatch (or a
+ * missing value, i.e. a pre-versioning user) invalidates their session and
+ * triggers a fresh OAuth run.
+ */
+export const SCOPE_VERSION = "2";
 
 /** The single logical MCP scope advertised to OAuth clients (claude.ai). */
 export const MCP_SCOPES = ["sheets"];

@@ -15,7 +15,7 @@ import {
   InvalidTokenError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { Config } from "./config.js";
-import { MCP_SCOPES } from "./config.js";
+import { MCP_SCOPES, SCOPE_VERSION } from "./config.js";
 import type { Store } from "./store.js";
 import { buildGoogleAuthUrl } from "./google.js";
 import { invalidateUserClients } from "./google.js";
@@ -138,6 +138,14 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
       if (rec.clientId !== client.client_id) {
         throw new InvalidGrantError("Refresh token was issued to a different client.");
       }
+      // Reject if the user's granted scopes are stale (Google scope set changed
+      // since they consented). They must re-run OAuth to grant the new scopes.
+      const user = await this.store.getUser(rec.sub);
+      if (!user || user.scopeVersion !== SCOPE_VERSION) {
+        throw new InvalidGrantError(
+          "Authorization scopes have changed; please reconnect to grant the new permissions."
+        );
+      }
       // Never widen scope on refresh.
       const nextScopes =
         scopes && scopes.length > 0
@@ -151,6 +159,16 @@ export class SheetsOAuthProvider implements OAuthServerProvider {
     return this.logged("verifyAccessToken", async () => {
       const rec = await this.store.getAccessToken(sha256(token));
       if (!rec) throw new InvalidTokenError("Access token is invalid or expired.");
+      // Reject tokens for users whose consented scope set is stale (or who
+      // predate scope versioning). Throwing InvalidTokenError yields a 401 with
+      // WWW-Authenticate, so the client re-runs OAuth and grants the new scopes.
+      const user = await this.store.getUser(rec.sub);
+      if (!user || user.scopeVersion !== SCOPE_VERSION) {
+        invalidateUserClients(rec.sub);
+        throw new InvalidTokenError(
+          "Authorization scopes have changed; please reconnect to grant the new permissions."
+        );
+      }
       return {
         token,
         clientId: rec.clientId,

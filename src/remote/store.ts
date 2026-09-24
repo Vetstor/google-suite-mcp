@@ -51,6 +51,14 @@ export interface UserRecord {
   email: string;
   refreshTokenEnc: string;
   updatedAt: number;
+  /**
+   * The SCOPE_VERSION in force when this user last consented. Compared against
+   * the current SCOPE_VERSION on every token verification; a mismatch (or an
+   * absent value = pre-versioning user) forces re-consent.
+   */
+  scopeVersion?: string;
+  /** Space-delimited scopes Google granted at last consent (debugging). */
+  grantedScopes?: string;
 }
 
 export interface Store {

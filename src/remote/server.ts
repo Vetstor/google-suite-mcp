@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { Config } from "./config.js";
-import { MCP_SCOPES } from "./config.js";
+import { MCP_SCOPES, SCOPE_VERSION } from "./config.js";
 import type { Store } from "./store.js";
 import { SheetsOAuthProvider } from "./provider.js";
 import { exchangeGoogleCode, getUserClients } from "./google.js";
@@ -56,7 +56,7 @@ export function createApp(deps: AppDeps): express.Express {
       baseUrl: new URL(config.baseUrl),
       resourceServerUrl: new URL(config.mcpResourceUrl),
       scopesSupported: MCP_SCOPES,
-      resourceName: "Google Sheets MCP",
+      resourceName: "Google Workspace MCP",
     })
   );
 
@@ -108,13 +108,18 @@ export function createApp(deps: AppDeps): express.Express {
         .send(`Access denied: ${identity.email} is not in an allowed domain.`);
     }
 
-    // Persist / refresh the user's encrypted Google refresh token.
+    // Persist / refresh the user's encrypted Google refresh token. Always stamp
+    // the current SCOPE_VERSION + granted scopes so re-consent clears a stale
+    // version. (prompt=consent normally returns a fresh refresh token; the else
+    // branch re-stamps an existing user when Google omits one.)
     if (identity.refreshToken) {
       await store.upsertUser({
         sub: identity.sub,
         email: identity.email,
         refreshTokenEnc: encrypt(identity.refreshToken, config.tokenEncryptionKey),
         updatedAt: Date.now(),
+        scopeVersion: SCOPE_VERSION,
+        grantedScopes: identity.grantedScopes,
       });
     } else {
       const existing = await store.getUser(identity.sub);
@@ -128,6 +133,14 @@ export function createApp(deps: AppDeps): express.Express {
               "https://myaccount.google.com/permissions and try again."
           );
       }
+      await store.upsertUser({
+        sub: existing.sub,
+        email: identity.email,
+        refreshTokenEnc: existing.refreshTokenEnc,
+        updatedAt: Date.now(),
+        scopeVersion: SCOPE_VERSION,
+        grantedScopes: identity.grantedScopes,
+      });
     }
 
     logger.info(
@@ -173,7 +186,7 @@ export function createApp(deps: AppDeps): express.Express {
       return;
     }
 
-    const server = new McpServer({ name: "sheets-mcp", version: "1.0.0" });
+    const server = new McpServer({ name: "google-workspace-mcp", version: "1.0.0" });
     registerAllTools(server, () => getUserClients(config, store, sub));
 
     const transport = new StreamableHTTPServerTransport({
@@ -217,7 +230,7 @@ export function createApp(deps: AppDeps): express.Express {
       .status(200)
       .type("text/plain")
       .send(
-        "Google Sheets MCP server (remote, OAuth 2.1).\n" +
+        "Google Workspace MCP server (remote, OAuth 2.1) — Sheets, Docs & Slides.\n" +
           `MCP endpoint: ${config.mcpResourceUrl}\n` +
           "Add as a custom connector in claude.ai. See README for setup.\n"
       );
